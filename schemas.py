@@ -17,3 +17,7 @@ class PaymentOut(BaseModel):
     ref: str
     amount: float
     status: str
+
+
+class StatusUpdate(BaseModel):
+    status: str
