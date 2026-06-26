@@ -26,3 +26,18 @@ async def on_document_posted(payload: dict, ctx) -> None:
             "entity_ref": payload.get("entity_ref"),
         },
     )
+
+
+async def on_freight_cost(payload: dict, ctx) -> None:
+    """Доставка завершена → расход на перевозку (logistics → finance).
+
+    Пишем платёж ``kind="freight"`` (расход), чтобы доход (счета) и фрахт можно было
+    развести при подсчёте валовой прибыли. Нулевой/пустой тариф игнорируем.
+    """
+    if ctx is None:
+        return
+    amount = Decimal(str(payload.get("amount", 0)))
+    if amount <= 0:
+        return
+    ref = payload.get("ref") or payload.get("entity_ref") or ""
+    ctx.session.add(Payment(ref=f"freight:{ref}", amount=amount, status="pending", kind="freight"))

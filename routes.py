@@ -24,7 +24,9 @@ async def list_payments(session: AsyncSession = Depends(get_session)):
 @router.post("/payments", response_model=PaymentOut, status_code=201)
 async def create_payment(payload: PaymentCreate, session: AsyncSession = Depends(get_session)):
     """Зафиксировать платёж."""
-    obj = Payment(ref=payload.ref, amount=Decimal(str(payload.amount)), status=payload.status)
+    obj = Payment(
+        ref=payload.ref, amount=Decimal(str(payload.amount)), status=payload.status, kind=payload.kind
+    )
     session.add(obj)
     await session.commit()
     await session.refresh(obj)

@@ -20,4 +20,6 @@ class Payment(Base):
     ref: Mapped[str] = mapped_column(String(255))
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
     status: Mapped[str] = mapped_column(String(32), default="pending", server_default="pending")
+    # receivable — счёт к получению (доход); freight — расход на перевозку (logistics → finance)
+    kind: Mapped[str] = mapped_column(String(32), default="receivable", server_default="receivable")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -8,6 +8,7 @@ class PaymentCreate(BaseModel):
     ref: str
     amount: float = 0
     status: str = "pending"
+    kind: str = "receivable"
 
 
 class PaymentOut(BaseModel):
@@ -17,6 +18,7 @@ class PaymentOut(BaseModel):
     ref: str
     amount: float
     status: str
+    kind: str = "receivable"
 
 
 class StatusUpdate(BaseModel):
