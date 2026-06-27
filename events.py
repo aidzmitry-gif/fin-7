@@ -120,8 +120,12 @@ async def on_landed_cost(payload: dict, ctx) -> None:
     """
     if ctx is None:
         return
+    # Закупки эмитят либо ``amount``, либо ``total_landed_byn`` (предпочтительнее), либо
+    # ``unit_landed_cost_byn × qty``. Берём первое доступное; нулевое — игнорим (honest-empty).
     amount = Decimal(str(payload.get("amount") or 0))
-    if amount <= 0:  # себестоимость может прийти как удельная × количество
+    if amount <= 0:
+        amount = Decimal(str(payload.get("total_landed_byn") or 0))
+    if amount <= 0:
         amount = Decimal(str(payload.get("unit_landed_cost_byn") or 0)) * Decimal(
             str(payload.get("qty") or 0)
         )
