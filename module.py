@@ -4,7 +4,7 @@ from __future__ import annotations
 from core.runtime.contract import ModuleContract, Widget
 from core.runtime.core import Core
 from modules.finance import routes
-from modules.finance.events import on_document_posted, on_freight_cost
+from modules.finance.events import on_document_posted, on_freight_cost, on_freight_refund
 
 
 class FinanceModule(ModuleContract):
@@ -18,6 +18,8 @@ class FinanceModule(ModuleContract):
         core.subscribe("sales.document.posted", on_document_posted)
         # логистика → финансы: доставлено → расход на фрахт (§2.5)
         core.subscribe("logistics.freight.cost", on_freight_cost)
+        # логистика → финансы: аудит счёта выявил переплату → возврат (кредит против фрахта)
+        core.subscribe("logistics.freight.audit_refund", on_freight_refund)
         core.register_widget(Widget("finance", "Финансы", source="finance.payments"))
 
 

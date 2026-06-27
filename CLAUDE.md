@@ -21,7 +21,8 @@
 ## Что регистрирует в ядре (register())
 - **Роуты**: `core.include_router(routes.router, prefix="/finance")`.
 - **Подписки**: `core.subscribe("sales.document.posted", on_document_posted)`;
-  `core.subscribe("logistics.freight.cost", on_freight_cost)` (расход на фрахт из логистики).
+  `core.subscribe("logistics.freight.cost", on_freight_cost)` (расход на фрахт из логистики);
+  `core.subscribe("logistics.freight.audit_refund", on_freight_refund)` (переплата к возврату → кредит против фрахта).
 - **Widgets**: `Widget("finance", "Финансы", source="finance.payments")`.
 - Workflow / permissions / roles / telegram / startup — не регистрирует.
 
@@ -32,12 +33,15 @@
 - **Подписан на**:
   - `sales.document.posted` → `on_document_posted` (реагирует только при `payload.kind == "invoice"`).
   - `logistics.freight.cost` → `on_freight_cost` (доставка завершена → `Payment(kind="freight")`, расход; нулевой тариф игнорится).
+  - `logistics.freight.audit_refund` → `on_freight_refund` (аудит счёта, `variance > 0` → `Payment(kind="freight_refund")` с **отрицательной** суммой — кредит против фрахта; нулевая сумма игнорится). payload `{shipment_code, carrier, amount, entity_ref:"audit:<id>"}`.
 
 ## Модель данных (таблицы схемы)
 - `finance.payment` (`Payment`): `id` (PK), `ref` (str 255), `amount` (Numeric(14,2), default 0),
   `status` (str 32, default `pending`), `kind` (str 32, default `receivable`; `receivable` — доход/счёт
-  к получению, `freight` — расход на перевозку), `created_at` (DateTime, server_default `now()`).
-  FK/связей нет — связь со сделкой логическая, через `ref` (для фрахта `ref = "freight:<№отгрузки>"`).
+  к получению, `freight` — расход на перевозку, `freight_refund` — возврат переплаты перевозчиком,
+  отрицательная сумма = кредит против фрахта), `created_at` (DateTime, server_default `now()`).
+  FK/связей нет — связь со сделкой логическая, через `ref` (фрахт `ref = "freight:<№отгрузки>"`,
+  возврат `ref = "freight_refund:audit:<id>"`).
   Колонка `kind` добавлена миграцией 0053.
 
 ## API-эндпоинты (ключевые)
