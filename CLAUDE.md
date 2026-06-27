@@ -51,9 +51,28 @@
 - `GET /finance/summary` — операционная сводка (`summary.py::finance_summary`): фактическая маржа
   (выручка − landed − чистый фрахт), касса ДДС-lite (приток/отток/сальдо, поступило/к поступлению),
   затраты по типам. Все суммы — BYN. Пустая база → нули + `margin.pct=None` (honest-empty).
-- `GET /finance/payments` — список платежей (сорт. по `id` desc).
-- `POST /finance/payments` — зафиксировать платёж (201).
-- `PATCH /finance/payments/{payment_id}` — сменить статус; при `paid` эмитит `finance.payment.paid` (404, если платёж не найден).
+- `GET /finance/aging` — AR/AP по корзинам `current/1-30/31-60/61-90/90+/no_due` (`aging.py`).
+- `GET /finance/cashflow-forecast?weeks=N` — понедельная проекция приток/отток/нетто/кумулятив + `not_dated` (`cashflow.py`; opening_balance = оплаченные счета − оплаченные расходы).
+- `GET /finance/by-cost-center?from=&to=` — суммы по центрам затрат за период (`cost_center.py`; дефолт по `kind`).
+- `GET /finance/margin/by-deal`, `GET /finance/margin/by-counterparty` — маржа по сделкам/контрагентам (`margin.py`; группа `key=None` — «не атрибутировано», в конце).
+- `GET /finance/reconcile-1c` — сверка с 1С (`reconcile.py`, СТРОГО ЧТЕНИЕ; недоступна → `source_available=false`).
+- `GET /finance/payments` — список платежей (с `outstanding` и `is_overdue`, вычисляются на чтении).
+- `GET /finance/payments/{id}` — платёж + `allocations` + `outstanding`.
+- `POST /finance/payments` — зафиксировать платёж (lifecycle + провенанс — опц.).
+- `PATCH /finance/payments/{id}` — сменить статус; при `paid` ставит `paid_at=now(UTC)` + эмитит `finance.payment.paid`.
+- `POST /finance/payments/{id}/allocations` — частичное поступление; авто-статус `partial`/`paid` + эмит при закрытии.
+
+## Lifecycle платежа (миграция 0061)
+- `status`: `planned` → `pending` → `partial` → `paid` (свободная строка).
+- **`overdue` НЕ хранится** — вычисляется на чтении: `status in (pending, partial) and due_date < today`.
+- Новые поля Payment: `due_date` (Date|None), `paid_at` (DateTime|None), `deal_id` (int|None), `counterparty_ref` (str|None — UNP/MDM).
+- Таблица `finance.payment_allocation` (`id`, `payment_id` FK→payment.id ON DELETE CASCADE, `amount`, `allocated_at`).
+- Авто-смена статуса в `POST /allocations`: `sum(amount) ≥ amount` → `paid` + эмит; `0 < sum < amount` → `partial`.
+
+## Мультивалюта + центры затрат (миграция 0063)
+- Колонки Payment: `cost_center` (str(32)|None), `currency` (str(3), default `BYN`), `amount_orig` (Numeric|None).
+- `amount` хранится ВСЕГДА в BYN после конвертации через `modules/finance/fx.py` (rates demo + буфер +10%).
+- `cost_center` — свободная строка; справочник — захардкоженный `cost_center.py` (дефолт по `kind`: landed→Закупки, freight/refund→Логистика, receivable→Продажи).
 
 ## Межмодульные связи и зависимости
 - **sales → finance**: счёт (`sales.document.posted`, `kind="invoice"`) создаёт `Payment(status="pending")`.

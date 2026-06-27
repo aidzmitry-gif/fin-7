@@ -5,17 +5,45 @@ Finance не знает о sales напрямую — реагирует на д
 """
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
+from modules.finance.fx import BASE as BASE_CCY
+from modules.finance.fx import to_byn
 from modules.finance.models import Payment
 
 
+def _parse_due_date(raw) -> date | None:
+    """Принять ISO-строку или date; вернуть date или None (honest-empty)."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, date):
+        return raw
+    try:
+        return date.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None  # ponytail: подгрузим валидацию когда продажи начнут слать срок
+
+
 async def on_document_posted(payload: dict, ctx) -> None:
-    """Счёт записан в 1С → создаём платёж к оплате (sales → finance)."""
+    """Счёт записан в 1С → создаём платёж к оплате (sales → finance).
+
+    Лайфсайкл (0061): ``due_date`` из payload (по умолчанию None — honest-empty),
+    ``deal_id``/``counterparty_ref`` — провенанс связи для маржи by-deal/by-counterparty.
+    """
     if payload.get("kind") != "invoice" or ctx is None:
         return
     amount = Decimal(str(payload.get("amount", 0)))
-    ctx.session.add(Payment(ref=payload.get("number", ""), amount=amount, status="pending"))
+    ctx.session.add(
+        Payment(
+            ref=payload.get("number", ""),
+            amount=amount,
+            status="pending",
+            due_date=_parse_due_date(payload.get("due_date")),
+            deal_id=payload.get("deal_id"),
+            counterparty_ref=payload.get("counterparty_ref"),
+        )
+    )
     ctx.services.event_bus.emit(
         ctx.session,
         "finance.payment.created",
@@ -40,7 +68,20 @@ async def on_freight_cost(payload: dict, ctx) -> None:
     if amount <= 0:
         return
     ref = payload.get("ref") or payload.get("entity_ref") or ""
-    ctx.session.add(Payment(ref=f"freight:{ref}", amount=amount, status="pending", kind="freight"))
+    currency = (payload.get("currency") or BASE_CCY).upper()
+    amount_byn = to_byn(amount, currency)
+    ctx.session.add(
+        Payment(
+            ref=f"freight:{ref}",
+            amount=amount_byn,
+            amount_orig=amount if currency != BASE_CCY else None,
+            currency=currency,
+            status="pending",
+            kind="freight",
+            deal_id=payload.get("deal_id"),
+            counterparty_ref=payload.get("counterparty_ref"),
+        )
+    )
 
 
 async def on_freight_refund(payload: dict, ctx) -> None:
@@ -59,7 +100,13 @@ async def on_freight_refund(payload: dict, ctx) -> None:
         return
     ref = payload.get("entity_ref") or payload.get("shipment_code") or ""
     ctx.session.add(
-        Payment(ref=f"freight_refund:{ref}", amount=-amount, status="pending", kind="freight_refund")
+        Payment(
+            ref=f"freight_refund:{ref}",
+            amount=-amount,
+            status="pending",
+            kind="freight_refund",
+            counterparty_ref=payload.get("counterparty_ref"),
+        )
     )
 
 
@@ -81,4 +128,17 @@ async def on_landed_cost(payload: dict, ctx) -> None:
     if amount <= 0:
         return
     ref = payload.get("entity_ref") or payload.get("sku_code") or ""
-    ctx.session.add(Payment(ref=f"landed:{ref}", amount=amount, status="pending", kind="landed"))
+    currency = (payload.get("currency") or BASE_CCY).upper()
+    amount_byn = to_byn(amount, currency)
+    ctx.session.add(
+        Payment(
+            ref=f"landed:{ref}",
+            amount=amount_byn,
+            amount_orig=amount if currency != BASE_CCY else None,
+            currency=currency,
+            status="pending",
+            kind="landed",
+            deal_id=payload.get("deal_id"),
+            counterparty_ref=payload.get("counterparty_ref"),
+        )
+    )
