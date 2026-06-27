@@ -11,8 +11,15 @@ from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from modules.finance.models import Payment
 from modules.finance.schemas import PaymentCreate, PaymentOut, StatusUpdate
+from modules.finance.summary import finance_summary
 
 router = APIRouter(tags=["finance"])
+
+
+@router.get("/summary")
+async def get_summary(session: AsyncSession = Depends(get_session)):
+    """Операционная сводка: фактическая маржа (выручка − landed − фрахт) + касса (ДДС-lite)."""
+    return await finance_summary(session)
 
 
 @router.get("/payments", response_model=list[PaymentOut])
