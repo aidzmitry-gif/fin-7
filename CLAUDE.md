@@ -14,7 +14,8 @@
 - `module.py` — `FinanceModule(ModuleContract)`, фабрика `get_module()`; `name="finance"`, `version="0.1.0"`, `api_prefix="/finance"`.
 - `models.py` — ORM `Payment` (схема `finance`).
 - `routes.py` — HTTP-API платежей (router без своего префикса, монтируется под `/finance`).
-- `events.py` — обработчик `on_document_posted(payload, ctx)`.
+- `events.py` — обработчики проводок: `on_document_posted`, `on_freight_cost`, `on_freight_refund`, `on_landed_cost`.
+- `summary.py` — `finance_summary(session)`: агрегат маржи (по фактам) и кассы (ДДС-lite) по `kind`.
 - `schemas.py` — Pydantic: `PaymentCreate`, `PaymentOut`, `StatusUpdate`.
 - `__init__.py` — пакет-маркер.
 
@@ -22,7 +23,8 @@
 - **Роуты**: `core.include_router(routes.router, prefix="/finance")`.
 - **Подписки**: `core.subscribe("sales.document.posted", on_document_posted)`;
   `core.subscribe("logistics.freight.cost", on_freight_cost)` (расход на фрахт из логистики);
-  `core.subscribe("logistics.freight.audit_refund", on_freight_refund)` (переплата к возврату → кредит против фрахта).
+  `core.subscribe("logistics.freight.audit_refund", on_freight_refund)` (переплата к возврату → кредит против фрахта);
+  `core.subscribe("procurement.landed_cost.calculated", on_landed_cost)` (себестоимость прихода → расход; ⚠ закупки пока НЕ эмитят — потребитель готов заранее, Горизонт 2).
 - **Widgets**: `Widget("finance", "Финансы", source="finance.payments")`.
 - Workflow / permissions / roles / telegram / startup — не регистрирует.
 
@@ -34,6 +36,7 @@
   - `sales.document.posted` → `on_document_posted` (реагирует только при `payload.kind == "invoice"`).
   - `logistics.freight.cost` → `on_freight_cost` (доставка завершена → `Payment(kind="freight")`, расход; нулевой тариф игнорится).
   - `logistics.freight.audit_refund` → `on_freight_refund` (аудит счёта, `variance > 0` → `Payment(kind="freight_refund")` с **отрицательной** суммой — кредит против фрахта; нулевая сумма игнорится). payload `{shipment_code, carrier, amount, entity_ref:"audit:<id>"}`.
+  - `procurement.landed_cost.calculated` → `on_landed_cost` (себестоимость прихода → `Payment(kind="landed")`, расход; сумма = `amount` либо `unit_landed_cost_byn × qty`; нуль игнорится). ⚠ **Закупки пока это событие НЕ эмитят** (Горизонт 2) — проводки `landed` появятся, когда закупки начнут эмитить; до тех пор honest-empty.
 
 ## Модель данных (таблицы схемы)
 - `finance.payment` (`Payment`): `id` (PK), `ref` (str 255), `amount` (Numeric(14,2), default 0),
@@ -45,6 +48,9 @@
   Колонка `kind` добавлена миграцией 0053.
 
 ## API-эндпоинты (ключевые)
+- `GET /finance/summary` — операционная сводка (`summary.py::finance_summary`): фактическая маржа
+  (выручка − landed − чистый фрахт), касса ДДС-lite (приток/отток/сальдо, поступило/к поступлению),
+  затраты по типам. Все суммы — BYN. Пустая база → нули + `margin.pct=None` (honest-empty).
 - `GET /finance/payments` — список платежей (сорт. по `id` desc).
 - `POST /finance/payments` — зафиксировать платёж (201).
 - `PATCH /finance/payments/{payment_id}` — сменить статус; при `paid` эмитит `finance.payment.paid` (404, если платёж не найден).
