@@ -207,6 +207,100 @@ async def on_claim_resolved(payload: dict, ctx) -> None:
     )
 
 
+async def on_reference_changed(payload: dict, ctx) -> None:
+    """Справочники сменили ставку/мастер-поле SKU → пометить landed-проводки как stale.
+
+    Подписка на ``reference.sku.changed`` / ``reference.ref_tnved.changed`` /
+    ``reference.ref_vat_rate.changed`` / ``reference.ref_currency_rate.changed`` (B2 Круг 4,
+    парная работа с Закупками). Финансы — **единый писатель проводок**, поэтому НЕ пишем
+    напрямую: эмитим аутгоинг-сигнал ``finance.landed.recompute_requested`` (outbox-паттерн),
+    Закупки подписываются и переэмитят ``procurement.landed_cost.calculated`` с актуальными
+    мастер-входами; финансы тогда перепишут проводки штатным ``on_landed_cost``.
+
+    **Дебаунс/идемпотентность.** На каждое входящее reference-событие выпускаем РОВНО ОДИН
+    сигнал, ``sku_codes`` дедуплицирован (set → sorted list). Если SKU нет — ``payments=0``,
+    сигнал не эмитим (honest-empty). Для FX-курса (``core.currency_rates``) сигнал содержит
+    ``currency_code`` вместо ``sku_codes`` (затронуты ВСЕ не-BYN landed-проводки).
+
+    Контекст пересчёта: через ``core.services.sku_master.landed_inputs_batch`` подгружаем
+    актуальные мастер-входы (duty/vat/weight/volume) и кладём в payload — Закупки используют
+    как «снимок» вместо повторного резолва.
+    """
+    if ctx is None:
+        return
+    ref_key = payload.get("ref_key") or ""
+    entity_ref = payload.get("entity_ref") or ""
+    actor = payload.get("actor")
+    table_value = entity_ref.split(":", 1)[1] if ":" in entity_ref else ""
+
+    # FX-курс — отдельный канал (SKU-агрегата нет; затронуты ВСЕ не-BYN landed-проводки)
+    if ref_key == "core.currency_rates":
+        ctx.services.event_bus.emit(
+            ctx.session,
+            "finance.fx.recompute_requested",
+            {
+                "ref_key": ref_key,
+                "entity_ref": entity_ref,
+                "currency_code": table_value,
+                "actor": actor,
+            },
+        )
+        return
+
+    # Резолвим затронутые SKU по типу справочника (только прямые ссылки Sku.tnved_code/vat_code;
+    # эффективный код через nomenclature_group — # ponytail: подключим, когда появится граф групп).
+    from sqlalchemy import select
+
+    from core.domain.models import Sku
+
+    sku_codes: set[str] = set()
+    if ref_key == "core.skus":
+        # entity_ref = "sku:<code>" → один SKU
+        if table_value:
+            sku_codes.add(table_value)
+    elif ref_key == "core.tnved" and table_value:
+        rows = (
+            await ctx.session.execute(
+                select(Sku.code).where(Sku.tnved_code == table_value)
+            )
+        ).all()
+        sku_codes.update(c for (c,) in rows)
+    elif ref_key == "core.vat_rates" and table_value:
+        rows = (
+            await ctx.session.execute(
+                select(Sku.code).where(Sku.vat_code == table_value)
+            )
+        ).all()
+        sku_codes.update(c for (c,) in rows)
+    else:
+        return  # незнакомый справочник — пропустить (honest-empty, не падать)
+
+    if not sku_codes:
+        return  # затронутых SKU нет — сигнал не эмитим (honest-empty)
+
+    codes_sorted = sorted(sku_codes)
+    # Контекст пересчёта: актуальные landed_inputs через ГОТОВЫЙ фасад ядра (REF3-1)
+    inputs: dict[str, dict | None] = {}
+    facade = getattr(ctx.services, "sku_master", None)
+    if facade is not None and hasattr(facade, "landed_inputs_batch"):
+        try:
+            inputs = await facade.landed_inputs_batch(ctx.session, codes_sorted)
+        except Exception:  # noqa: BLE001 — fail-soft: пересчёт можно и без контекста
+            inputs = {}
+
+    ctx.services.event_bus.emit(
+        ctx.session,
+        "finance.landed.recompute_requested",
+        {
+            "ref_key": ref_key,
+            "entity_ref": entity_ref,
+            "sku_codes": codes_sorted,
+            "actor": actor,
+            "inputs": inputs,
+        },
+    )
+
+
 async def on_po_drafted(payload: dict, ctx) -> None:
     """Закупки выписали PO → планируемый отток (procurement → finance).
 

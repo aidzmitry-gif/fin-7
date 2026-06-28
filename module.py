@@ -11,6 +11,7 @@ from modules.finance.events import (
     on_freight_refund,
     on_landed_cost,
     on_po_drafted,
+    on_reference_changed,
 )
 
 
@@ -33,6 +34,12 @@ class FinanceModule(ModuleContract):
         core.subscribe("procurement.claim.resolved", on_claim_resolved)
         # закупки → финансы (FIN-B1): PO выписан → планируемый отток в cashflow-прогноз
         core.subscribe("procurement.po.drafted", on_po_drafted)
+        # справочники → финансы (B2 Круг 4): смена ставки/мастер-полей SKU → recompute-сигнал
+        # downstream Закупкам (outbox-паттерн; finance остаётся единым писателем проводок).
+        core.subscribe("reference.sku.changed", on_reference_changed)
+        core.subscribe("reference.ref_tnved.changed", on_reference_changed)
+        core.subscribe("reference.ref_vat_rate.changed", on_reference_changed)
+        core.subscribe("reference.ref_currency_rate.changed", on_reference_changed)
         core.register_widget(Widget("finance", "Финансы", source="finance.payments"))
 
 

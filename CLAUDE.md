@@ -3,7 +3,7 @@
 **Тип:** git submodule → fin-7 (правка = коммит в этот репозиторий)
 **API-префикс:** `/finance`
 **Схема БД:** `finance`
-**Статус:** ТЗ-Р4 — Платёжный календарь (день+банк-счёт+UI; миграция 0075)
+**Статус:** Круг 4 — B2 (reference.*.changed → recompute landed) + Р4 закрыт (миграция 0075)
 
 ## Назначение
 Учёт платежей по фактам-проводкам: счёт→оплата, фрахт, landed-себес, компенсация по
@@ -35,6 +35,7 @@
   - `procurement.landed_cost.calculated` → `on_landed_cost` (себестоимость прихода → `Payment(kind=landed)`).
   - **`procurement.claim.resolved` → `on_claim_resolved`** (Р3): resolved + amount_byn>0 → `Payment(kind=claim_refund)`.
   - **`procurement.po.drafted` → `on_po_drafted`** (Р3): PO выписан → `Payment(kind=po_planned, status=planned)` для прогноза кассы.
+  - **`reference.sku.changed` / `reference.ref_tnved.changed` / `reference.ref_vat_rate.changed` / `reference.ref_currency_rate.changed` → `on_reference_changed`** (Круг 4 B2): смена ставки/мастер-полей SKU → outbox-сигнал `finance.landed.recompute_requested` (или `finance.fx.recompute_requested` для FX); finance НЕ пересчитывает суммы сам — это outbox для Закупок (они переэмитят `procurement.landed_cost.calculated` с актуальными мастер-входами).
 - **Widgets**: `Widget("finance", "Финансы", source="finance.payments")`.
 
 ## События
@@ -42,6 +43,8 @@
   - `finance.payment.created` — из `on_document_posted` при создании платежа из счёта. **`amount` — СТРОКА** (Р3, FIN-A2: деньги собственника не через float). payload `{ref, amount:str, deal_id, entity_ref}`.
   - `finance.payment.paid` — из `PATCH /payments/{id}` (status=paid) и `POST /allocations` при полном закрытии. payload `{ref, entity_ref:"payment:<id>"}`.
   - **`finance.payment.received`** (Р3, FIN-C3) — из `POST /payments/{id}/allocations` на **каждое** поступление (вкл. частичное; для office, замыкает мёртвую подписку). payload `{ref, amount:str, entity_ref, deal_id, counterparty_ref, outstanding:str}`.
+  - **`finance.landed.recompute_requested`** (Круг 4 B2) — из `on_reference_changed` при смене ставки/мастер-полей SKU; downstream — Закупки (переэмитят landed_cost.calculated). payload `{ref_key, entity_ref, sku_codes:[...sorted, unique...], actor, inputs:{sku_code: landed_inputs|None}}`. Дедуп sku_codes ВНУТРИ payload; на каждое входящее reference-событие — РОВНО ОДИН outbox-сигнал (дальнейший дедуп — на стороне читателя).
+  - **`finance.fx.recompute_requested`** (Круг 4 B2) — для FX-курса (`core.currency_rates`); затронуты ВСЕ не-BYN landed-проводки. payload `{ref_key, entity_ref, currency_code, actor}`.
 - **Подписан на**: см. блок «Подписки» выше.
 
 ## Модель данных
