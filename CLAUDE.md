@@ -3,7 +3,7 @@
 **Тип:** git submodule → fin-7 (правка = коммит в этот репозиторий)
 **API-префикс:** `/finance`
 **Схема БД:** `finance`
-**Статус:** ТЗ-Р3 (Круг 3) закрыт — операционная сводка + lifecycle + сходимость маржи
+**Статус:** ТЗ-Р4 — Платёжный календарь (день+банк-счёт+UI; миграция 0075)
 
 ## Назначение
 Учёт платежей по фактам-проводкам: счёт→оплата, фрахт, landed-себес, компенсация по
@@ -49,7 +49,10 @@
   `status(32)` (`planned`→`pending`→`partial`→`paid`), `kind(32)`, `created_at`.
   Lifecycle (0061): `due_date`, `paid_at`, `deal_id`, `counterparty_ref(64)`.
   Мультивалюта (0063): `cost_center(32)`, `currency(3)`, `amount_orig(Numeric)`.
+  Банк-счёт (0075, Р4): `account_id` (FK→`finance.bank_account.id` ON DELETE SET NULL).
 - `finance.payment_allocation`: `id`, `payment_id FK→payment.id ON DELETE CASCADE`, `amount`, `allocated_at`.
+- `finance.bank_account` (`BankAccount`, 0075, Р4): `id`, `code(32) unique`, `title(120)`,
+  `currency(3)`, `opening_balance(Numeric)`, `opening_at(Date|None)`, `is_active(int 0/1)`.
 
 ## Виды проводок (`kind`)
 | kind | Знак | Смысл |
@@ -65,7 +68,10 @@
 - `GET /finance/summary` — операционная сводка: маржа (по фактам, с учётом claim_refund) +
   касса ДДС-lite + затраты по типам.
 - `GET /finance/aging` — AR/AP по корзинам; `po_planned`/`claim_refund` НЕ участвуют.
-- `GET /finance/cashflow-forecast?weeks=N` — понедельная проекция; **отток включает `po_planned`** (Р3).
+- `GET /finance/cashflow-forecast?mode=week|day&weeks=N&days=M&account_id=ID` — Р4 поддерживает
+  день/неделю и фильтр по банк-счёту; **отток включает `po_planned`** (Р3); `account_id` опц.
+  (без него — все платежи, с ним — только этот счёт; opening_balance += `BankAccount.opening_balance`).
+- `GET /finance/bank-accounts?active_only=true` / `POST /finance/bank-accounts` / `PATCH /finance/bank-accounts/{id}` (Р4) — CRUD банк-счетов; `code` уникален; деактивация через `is_active=false`.
 - `GET /finance/by-cost-center?from=&to=` — суммы по центрам; `claim_refund` → доход в центр Закупки; `po_planned` исключён.
 - `GET /finance/margin/by-deal`, `GET /finance/margin/by-counterparty` — маржа (с учётом claim_refund вычитанием из landed); `po_planned` исключён.
 - **`GET /finance/margin/reconcile-deal?deal_id=&items=SKU1:qty1,SKU2:qty2`** (Р3, FIN-A1) — сходимость

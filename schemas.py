@@ -14,6 +14,7 @@ class PaymentCreate(BaseModel):
     due_date: date | None = None
     deal_id: int | None = None
     counterparty_ref: str | None = None
+    account_id: int | None = None
 
 
 class PaymentOut(BaseModel):
@@ -28,6 +29,7 @@ class PaymentOut(BaseModel):
     paid_at: datetime | None = None
     deal_id: int | None = None
     counterparty_ref: str | None = None
+    account_id: int | None = None
     # Вычисляемые поля (заполняются в роутере):
     outstanding: float | None = None  # остаток к поступлению (amount − sum allocations)
     is_overdue: bool | None = None  # status in (pending, partial) and due_date < today
@@ -52,3 +54,33 @@ class AllocationOut(BaseModel):
 
 class PaymentDetail(PaymentOut):
     allocations: list[AllocationOut] = []
+
+
+# ───────────────────────── Р4: банковские счета ─────────────────────────
+
+
+class BankAccountCreate(BaseModel):
+    code: str
+    title: str
+    currency: str = "BYN"
+    opening_balance: float = 0
+    opening_at: date | None = None
+
+
+class BankAccountUpdate(BaseModel):
+    title: str | None = None
+    is_active: bool | None = None
+    opening_balance: float | None = None
+    opening_at: date | None = None
+
+
+class BankAccountOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    title: str
+    currency: str
+    opening_balance: float
+    opening_at: date | None = None
+    is_active: bool

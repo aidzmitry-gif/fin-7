@@ -10,10 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
-from modules.finance.models import Payment, PaymentAllocation
+from modules.finance.models import BankAccount, Payment, PaymentAllocation
 from modules.finance.schemas import (
     AllocationCreate,
     AllocationOut,
+    BankAccountCreate,
+    BankAccountOut,
+    BankAccountUpdate,
     PaymentCreate,
     PaymentDetail,
     PaymentOut,
@@ -43,12 +46,28 @@ async def get_aging(session: AsyncSession = Depends(get_session)):
 
 @router.get("/cashflow-forecast")
 async def get_cashflow_forecast(
-    weeks: int = 8, session: AsyncSession = Depends(get_session)
+    weeks: int = 8,
+    mode: str = "week",
+    days: int = 30,
+    account_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
 ):
-    """Понедельная проекция движения денег по due_date неоплаченных платежей."""
+    """Понедельный (mode='week') или подневный (mode='day') прогноз кэш-фло (Р4).
+
+    Опц. ``account_id`` — фильтр по банк-счёту (платежи без account_id — общий кэш,
+    не суммируются в выбранный счёт). Без ``account_id`` — все платежи.
+    """
     from modules.finance.cashflow import cashflow_forecast
 
-    return await cashflow_forecast(session, weeks=max(1, min(weeks, 52)))
+    if mode not in ("week", "day"):
+        mode = "week"
+    return await cashflow_forecast(
+        session,
+        weeks=max(1, min(weeks, 52)),
+        days=max(1, min(days, 90)),
+        mode=mode,  # type: ignore[arg-type]
+        account_id=account_id,
+    )
 
 
 @router.get("/by-cost-center")
@@ -120,6 +139,96 @@ def _safe_date(raw: str | None) -> date | None:
         return None
 
 
+# ───────────────────────── Банковские счета (Р4) ─────────────────────────
+
+
+@router.get("/bank-accounts", response_model=list[BankAccountOut])
+async def list_bank_accounts(
+    active_only: bool = True, session: AsyncSession = Depends(get_session)
+):
+    """Список банковских счетов (по умолчанию только активные)."""
+    q = select(BankAccount).order_by(BankAccount.id)
+    if active_only:
+        q = q.where(BankAccount.is_active == 1)
+    rows = (await session.execute(q)).scalars().all()
+    return [
+        {
+            "id": a.id,
+            "code": a.code,
+            "title": a.title,
+            "currency": a.currency,
+            "opening_balance": float(a.opening_balance),
+            "opening_at": a.opening_at,
+            "is_active": bool(a.is_active),
+        }
+        for a in rows
+    ]
+
+
+@router.post("/bank-accounts", response_model=BankAccountOut, status_code=201)
+async def create_bank_account(
+    payload: BankAccountCreate, session: AsyncSession = Depends(get_session)
+):
+    """Завести банк-счёт / кассу. ``code`` уникален."""
+    exists = (
+        await session.execute(select(BankAccount).where(BankAccount.code == payload.code))
+    ).scalar_one_or_none()
+    if exists is not None:
+        raise HTTPException(status_code=409, detail=f"Счёт {payload.code!r} уже существует")
+    obj = BankAccount(
+        code=payload.code,
+        title=payload.title,
+        currency=payload.currency,
+        opening_balance=Decimal(str(payload.opening_balance)),
+        opening_at=payload.opening_at,
+        is_active=1,
+    )
+    session.add(obj)
+    await session.commit()
+    await session.refresh(obj)
+    return {
+        "id": obj.id,
+        "code": obj.code,
+        "title": obj.title,
+        "currency": obj.currency,
+        "opening_balance": float(obj.opening_balance),
+        "opening_at": obj.opening_at,
+        "is_active": bool(obj.is_active),
+    }
+
+
+@router.patch("/bank-accounts/{account_id}", response_model=BankAccountOut)
+async def update_bank_account(
+    account_id: int,
+    payload: BankAccountUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Частичное обновление: title / opening / активность. ``code`` менять нельзя."""
+    obj = await session.get(BankAccount, account_id)
+    if obj is None:
+        raise HTTPException(status_code=404, detail="Счёт не найден")
+    data = payload.model_dump(exclude_unset=True)
+    if "title" in data and data["title"] is not None:
+        obj.title = data["title"]
+    if "is_active" in data and data["is_active"] is not None:
+        obj.is_active = 1 if data["is_active"] else 0
+    if "opening_balance" in data and data["opening_balance"] is not None:
+        obj.opening_balance = Decimal(str(data["opening_balance"]))
+    if "opening_at" in data:
+        obj.opening_at = data["opening_at"]
+    await session.commit()
+    await session.refresh(obj)
+    return {
+        "id": obj.id,
+        "code": obj.code,
+        "title": obj.title,
+        "currency": obj.currency,
+        "opening_balance": float(obj.opening_balance),
+        "opening_at": obj.opening_at,
+        "is_active": bool(obj.is_active),
+    }
+
+
 # ───────────────────────── Платежи ─────────────────────────
 
 
@@ -153,15 +262,21 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
         "paid_at": p.paid_at,
         "deal_id": p.deal_id,
         "counterparty_ref": p.counterparty_ref,
+        "account_id": p.account_id,
         "outstanding": float(outstanding),
         "is_overdue": is_overdue,
     }
 
 
 @router.get("/payments", response_model=list[PaymentOut])
-async def list_payments(session: AsyncSession = Depends(get_session)):
-    """Платежи (с outstanding и is_overdue, посчитанными на чтении)."""
-    rows = (await session.execute(select(Payment).order_by(Payment.id.desc()))).scalars().all()
+async def list_payments(
+    account_id: int | None = None, session: AsyncSession = Depends(get_session)
+):
+    """Платежи (с outstanding и is_overdue, посчитанными на чтении). Опц. фильтр по счёту."""
+    q = select(Payment).order_by(Payment.id.desc())
+    if account_id is not None:
+        q = q.where(Payment.account_id == account_id)
+    rows = (await session.execute(q)).scalars().all()
     # Aggregated allocations: один запрос вместо N+1
     sums = dict(
         (
@@ -208,6 +323,7 @@ async def create_payment(payload: PaymentCreate, session: AsyncSession = Depends
         due_date=payload.due_date,
         deal_id=payload.deal_id,
         counterparty_ref=payload.counterparty_ref,
+        account_id=payload.account_id,
     )
     session.add(obj)
     await session.commit()
