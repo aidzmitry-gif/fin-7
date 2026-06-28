@@ -5,8 +5,17 @@
 honest-empty с флагом ``source_available=False`` (НЕ ошибка, экран показывает плашку).
 
 Не пишем в 1С, ledger не дублируем.
+
+⚠ Круг 5 харднинг (К5-1): сопоставление через **список-по-ключу**, не словарь —
+иначе дубли `ref+counterparty_ref` (исправления, пересчёты, отсутствие УНП у пары
+платежей с одинаковым ref) схлопываются и теряются. Сумма парсится **безопасно**
+(локализация «100,00» из 1С + Decimal от строки + fail-soft 0 на мусор), float
+сейчас в выходе остался (money-в-API — отдельный NEEDS-ARB на круге 5).
 """
 from __future__ import annotations
+
+from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +24,8 @@ from modules.finance.models import Payment
 
 
 def _erp_key(p: Payment) -> str:
-    """Ключ сопоставления: ref (счёт) + контрагент (если есть)."""
+    """Ключ группировки: ref (счёт) + контрагент (если есть). Используется только для bucket'a;
+    несколько платежей с одинаковым ключом — это нормально (дубли, исправления, пересчёт)."""
     cp = p.counterparty_ref or ""
     return f"{p.ref}|{cp}"
 
@@ -24,11 +34,30 @@ def _onec_key(row: dict) -> str:
     return f"{row.get('ref', '')}|{row.get('counterparty_ref', '') or ''}"
 
 
+def _safe_amount(raw) -> float:
+    """Безопасный parse суммы из 1С: int/float как есть, строка — через Decimal с заменой
+    запятой на точку (РФ-локализация 1С). Мусор / None → 0.0 (fail-soft, не исключение)."""
+    if raw is None or raw == "":
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    try:
+        s = str(raw).replace(" ", "").replace(" ", "").replace(",", ".")
+        return float(Decimal(s))
+    except (InvalidOperation, ValueError, TypeError):
+        return 0.0
+
+
 async def reconcile_with_onec(session: AsyncSession, gateway) -> dict:
     """Сопоставить платежи ERP с тем, что вернул 1С.
 
     Возвращает ``{matched, only_in_erp, only_in_1c, as_of, source, source_available}``.
     При недоступности 1С (нет шлюза / нет метода / падение / пусто) — source_available=False.
+
+    Матчинг — **по парам в bucket'е ключа** (Round-5 К5-1): для каждого ключа берём
+    min(len(erp), len(onec)) пар → matched; остаток ERP → only_in_erp; остаток 1С →
+    only_in_1c. Дубли НЕ схлопываются. Внутри bucket'а сопоставляем по индексу (стабильно
+    по порядку записи), без эвристик по сумме — это сверка наличия, не амт-матчинг.
     """
     from datetime import UTC, datetime
 
@@ -43,22 +72,35 @@ async def reconcile_with_onec(session: AsyncSession, gateway) -> dict:
             onec_rows = []
             source_available = False
 
-    erp = (await session.execute(select(Payment))).scalars().all()
-    erp_by_key = {_erp_key(p): p for p in erp}
-    onec_by_key = {_onec_key(r): r for r in onec_rows}
+    erp_payments = (await session.execute(select(Payment))).scalars().all()
+    erp_buckets: dict[str, list[Payment]] = defaultdict(list)
+    for p in erp_payments:
+        erp_buckets[_erp_key(p)].append(p)
+    onec_buckets: dict[str, list[dict]] = defaultdict(list)
+    for r in onec_rows:
+        onec_buckets[_onec_key(r)].append(r)
 
-    matched, only_in_erp, only_in_1c = [], [], []
-    for k, p in erp_by_key.items():
-        if k in onec_by_key:
-            matched.append({"ref": p.ref, "amount": float(p.amount), "counterparty_ref": p.counterparty_ref})
-        else:
-            only_in_erp.append({"ref": p.ref, "amount": float(p.amount), "counterparty_ref": p.counterparty_ref})
-    for k, r in onec_by_key.items():
-        if k not in erp_by_key:
+    matched: list[dict] = []
+    only_in_erp: list[dict] = []
+    only_in_1c: list[dict] = []
+    all_keys = set(erp_buckets) | set(onec_buckets)
+    for k in all_keys:
+        erp_list = erp_buckets.get(k, [])
+        onec_list = onec_buckets.get(k, [])
+        pair_count = min(len(erp_list), len(onec_list))
+        for p in erp_list[:pair_count]:
+            matched.append(
+                {"ref": p.ref, "amount": float(p.amount), "counterparty_ref": p.counterparty_ref}
+            )
+        for p in erp_list[pair_count:]:
+            only_in_erp.append(
+                {"ref": p.ref, "amount": float(p.amount), "counterparty_ref": p.counterparty_ref}
+            )
+        for r in onec_list[pair_count:]:
             only_in_1c.append(
                 {
                     "ref": r.get("ref"),
-                    "amount": float(r.get("amount", 0)),
+                    "amount": _safe_amount(r.get("amount", 0)),
                     "counterparty_ref": r.get("counterparty_ref"),
                 }
             )

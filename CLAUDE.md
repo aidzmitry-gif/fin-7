@@ -3,7 +3,7 @@
 **Тип:** git submodule → fin-7 (правка = коммит в этот репозиторий)
 **API-префикс:** `/finance`
 **Схема БД:** `finance`
-**Статус:** Круг 4 — B2 (reference.*.changed → recompute landed) + Р4 закрыт (миграция 0075)
+**Статус:** Круг 5 — харднинг reconcile (дубли ref / запятая в сумме / без УНП) + Круг 4 B2 + Р4 закрыты
 
 ## Назначение
 Учёт платежей по фактам-проводкам: счёт→оплата, фрахт, landed-себес, компенсация по
@@ -81,6 +81,7 @@
   finance↔facade landed по сделке. Без `items` или без `core.services.landed_cost` →
   `source_facade_available=false` (honest-empty), `delta=None`, `finance_landed` всё равно отдаётся.
 - `GET /finance/reconcile-1c` — сверка с 1С (СТРОГО ЧТЕНИЕ, fail-soft). Метод `OneCGateway.fetch_payments` (см. ниже).
+  **Круг 5 К5-1**: матчинг через bucket-по-ключу (list, не dict) — дубли `ref+counterparty_ref` НЕ схлопываются; `_safe_amount` принимает `'100,00'` (1С-локализация) / `'100 000'` / мусор → fail-soft `0.0`.
 - `GET /finance/payments` — список платежей (вычисляемые `outstanding`/`is_overdue`).
 - `GET /finance/payments/{id}` — платёж + allocations + outstanding.
 - `POST /finance/payments` — зафиксировать платёж.
