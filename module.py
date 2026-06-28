@@ -5,10 +5,12 @@ from core.runtime.contract import ModuleContract, Widget
 from core.runtime.core import Core
 from modules.finance import routes
 from modules.finance.events import (
+    on_claim_resolved,
     on_document_posted,
     on_freight_cost,
     on_freight_refund,
     on_landed_cost,
+    on_po_drafted,
 )
 
 
@@ -27,6 +29,10 @@ class FinanceModule(ModuleContract):
         core.subscribe("logistics.freight.audit_refund", on_freight_refund)
         # закупки → финансы: себестоимость прихода → проводка-затрата (для фактической маржи)
         core.subscribe("procurement.landed_cost.calculated", on_landed_cost)
+        # закупки → финансы (FIN-C1): компенсация по претензии (resolved+amount_byn>0)
+        core.subscribe("procurement.claim.resolved", on_claim_resolved)
+        # закупки → финансы (FIN-B1): PO выписан → планируемый отток в cashflow-прогноз
+        core.subscribe("procurement.po.drafted", on_po_drafted)
         core.register_widget(Widget("finance", "Финансы", source="finance.payments"))
 
 

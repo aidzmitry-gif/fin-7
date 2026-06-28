@@ -61,7 +61,10 @@ async def cashflow_forecast(
         if w in weeks_map:
             weeks_map[w]["inflow"] += outstanding
 
-    for p, outstanding in await _payments_outstanding(session, ("freight", "landed")):
+    # отток включает PO_planned (FIN-B1) — это ещё план, но для прогноза кассы важен
+    for p, outstanding in await _payments_outstanding(
+        session, ("freight", "landed", "po_planned")
+    ):
         if p.due_date is None:
             not_dated_out += outstanding
             continue

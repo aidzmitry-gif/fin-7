@@ -21,6 +21,8 @@ DEFAULT_BY_KIND = {
     "freight": "Логистика",
     "freight_refund": "Логистика",
     "receivable": "Продажи",
+    "claim_refund": "Закупки",  # компенсация по претензии — доход в центр Закупки
+    "po_planned": "Закупки",  # планируемый PO — справочно в центр Закупки (не факт)
 }
 KNOWN_CENTERS = ("Закупки", "Логистика", "Продажи")
 
@@ -46,10 +48,14 @@ async def group_by_cost_center(
     rows = (await session.execute(q)).scalars().all()
     by: dict[str, dict[str, Decimal]] = {}
     for p in rows:
+        # po_planned — план, в фактический отчёт по центрам не попадает (honest)
+        if p.kind == "po_planned":
+            continue
         center = resolve_center(p)
         slot = by.setdefault(center, {"income": Decimal("0"), "expense": Decimal("0")})
         amt = Decimal(str(p.amount))
-        if p.kind == "receivable":
+        if p.kind in ("receivable", "claim_refund"):
+            # выручка + компенсация поставщика — доход (приток в свой центр)
             slot["income"] += amt
         elif p.kind == "freight_refund":
             # возврат фрахта — отрицательная сумма → уменьшает «expense» через += знаков

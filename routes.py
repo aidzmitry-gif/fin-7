@@ -79,6 +79,27 @@ async def margin_by_counterparty(session: AsyncSession = Depends(get_session)):
     return await fn(session)
 
 
+@router.get("/margin/reconcile-deal")
+async def margin_reconcile_deal(
+    deal_id: int,
+    items: str | None = None,
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+):
+    """Сходимость landed по сделке: finance (проводки) ↔ facade (landed-cost ядра).
+
+    Параметры:
+        - ``deal_id`` — сделка для сверки.
+        - ``items`` — опц. ``SKU1:qty1,SKU2:qty2`` — список SKU+qty позиций сделки для
+          расчёта контрольной величины через ``core.services.landed_cost``. Без ``items``
+          или с отсутствующим фасадом → ``source_facade_available=false`` (honest-empty).
+    """
+    from modules.finance.margin import _parse_items, reconcile_deal_margin
+
+    facade = getattr(core.services, "landed_cost", None)
+    return await reconcile_deal_margin(session, facade, deal_id, _parse_items(items))
+
+
 @router.get("/reconcile-1c")
 async def reconcile_1c(
     core: Core = Depends(get_core),
@@ -242,6 +263,22 @@ async def create_allocation(
     await session.flush()
     total = await _sum_allocations(session, payment_id)
     target = Decimal(str(payment.amount))
+    outstanding_after = target - total
+    # FIN-C3: эмит на КАЖДОЕ поступление (closes мёртвая подписка office на received).
+    # Семантика: received = любое поступление (вкл. частичное); paid = полное закрытие.
+    # Деньги — СТРОКОЙ (см. FIN-A2): float дрейфует копейки на собственнике.
+    core.event_bus.emit(
+        session,
+        "finance.payment.received",
+        {
+            "ref": payment.ref,
+            "amount": str(amt),
+            "entity_ref": f"payment:{payment.id}",
+            "deal_id": payment.deal_id,
+            "counterparty_ref": payment.counterparty_ref,
+            "outstanding": str(outstanding_after if outstanding_after > 0 else Decimal("0")),
+        },
+    )
     if total >= target:
         if payment.status != "paid":
             payment.status = "paid"
