@@ -130,6 +130,70 @@ async def reconcile_1c(
     return await reconcile_with_onec(session, getattr(core.services, "onec", None))
 
 
+# ───────────────────────── ДДС (Р6) ─────────────────────────
+
+
+@router.get("/cashflow")
+async def get_cashflow(
+    period_from: str | None = None,
+    period_to: str | None = None,
+    format: str | None = None,  # noqa: A002
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+):
+    """ДДС за период (cash-basis). Все суммы — строки BYN (Decimal, без float-дрейфа).
+
+    ``period_from`` / ``period_to`` — ISO-даты; некорректный формат → 400.
+    ``?format=csv`` — CSV-выгрузка для скачивания.
+    ``bank_balance`` — остаток из 1С (OneCGateway.fetch_bank_balance); None при mock-режиме.
+    """
+    from modules.finance.cashflow_dds import cashflow_report
+
+    from_dt = _safe_date(period_from)
+    to_dt = _safe_date(period_to)
+    if period_from and from_dt is None:
+        raise HTTPException(status_code=400, detail=f"Некорректная дата period_from: {period_from!r}")
+    if period_to and to_dt is None:
+        raise HTTPException(status_code=400, detail=f"Некорректная дата period_to: {period_to!r}")
+
+    onec = getattr(core.services, "onec", None)
+    data = await cashflow_report(session, from_dt, to_dt, onec)
+
+    if format == "csv":
+        period_label = f"{period_from or 'начало'} — {period_to or 'сейчас'}"
+        lines = [f"Показатель,Сумма BYN,Период {period_label}"]
+        for label, key in [
+            ("Поступления", "inflows"),
+            ("Выбытия", "outflows"),
+            ("Нетто", "net_cashflow"),
+        ]:
+            lines.append(f"{label},{data[key]}")
+        lines.append(f"Остаток на счёте,{data['bank_balance'] or ''}")
+        lines.append("")
+        lines.append("Вид,Сумма BYN")
+        breakdown_labels = {
+            "receivable": "Поступления (receivable)",
+            "payroll": "ФОТ",
+            "opex": "Прочие операционные",
+            "tax": "Налоги",
+            "bank_fee": "Банковские расходы",
+            "freight": "Фрахт",
+            "landed": "Себестоимость (landed)",
+            "po_planned": "PO планируемый",
+        }
+        for kind, amount in data["breakdown"].items():
+            lines.append(f"{breakdown_labels.get(kind, kind)},{amount}")
+        csv_body = "\n".join(lines) + "\n"
+        fn = f"cashflow_{period_from or 'all'}_{period_to or 'now'}.csv"
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={fn}"},
+        )
+
+    return data
+
+
 # ───────────────────────── P&L (Р5) ─────────────────────────
 
 
