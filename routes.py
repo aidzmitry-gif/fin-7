@@ -194,6 +194,60 @@ async def get_cashflow(
     return data
 
 
+# ───────────────────────── Баланс (Р7) ─────────────────────────
+
+
+@router.get("/balance-sheet")
+async def get_balance_sheet(
+    as_of: str | None = None,
+    format: str | None = None,  # noqa: A002
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+):
+    """Бухгалтерский баланс на дату (Р7). Все суммы — строки BYN.
+
+    ``as_of`` — ISO-дата; некорректный формат → 400; без параметра — сегодня.
+    ``?format=csv`` — CSV-выгрузка для скачивания.
+    ``cash`` / ``inventory_value`` — None при mock-режиме (нет связи с 1С).
+    """
+    from modules.finance.balance_sheet import get_balance_sheet as _balance
+
+    if as_of:
+        as_of_date = _safe_date(as_of)
+        if as_of_date is None:
+            raise HTTPException(status_code=400, detail=f"Некорректная дата as_of: {as_of!r}")
+    else:
+        from datetime import date as _date
+
+        as_of_date = _date.today()
+
+    data = await _balance(session, as_of_date, core.services)
+
+    if format == "csv":
+        lines = [f"Показатель,Сумма BYN,На дату {data['as_of']}"]
+        for label, key in [
+            ("Дебиторская задолженность", "accounts_receivable"),
+            ("Денежные средства (банк)", "cash"),
+            ("Запасы (склад)", "inventory_value"),
+            ("ИТОГО Активы", "total_assets"),
+            ("Кредиторская задолженность", "accounts_payable"),
+            ("Задолженность по ФОТ", "payroll_payable"),
+            ("Задолженность по налогам", "tax_payable"),
+            ("ИТОГО Пассивы", "total_liabilities"),
+            ("Капитал (Equity)", "equity"),
+        ]:
+            lines.append(f"{label},{data[key] or ''}")
+        csv_body = "\n".join(lines) + "\n"
+        fn = f"balance_sheet_{data['as_of']}.csv"
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={fn}"},
+        )
+
+    return data
+
+
 # ───────────────────────── P&L (Р5) ─────────────────────────
 
 
