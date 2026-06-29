@@ -6,10 +6,13 @@ from core.runtime.core import Core
 from modules.finance import routes
 from modules.finance.events import (
     on_claim_resolved,
+    on_deal_handoff,
     on_document_posted,
     on_freight_cost,
     on_freight_refund,
     on_landed_cost,
+    on_payroll_accrued,
+    on_payroll_paid,
     on_po_drafted,
     on_reference_changed,
 )
@@ -40,6 +43,11 @@ class FinanceModule(ModuleContract):
         core.subscribe("reference.ref_tnved.changed", on_reference_changed)
         core.subscribe("reference.ref_vat_rate.changed", on_reference_changed)
         core.subscribe("reference.ref_currency_rate.changed", on_reference_changed)
+        # HR → финансы (Р5): ФОТ начислен / выплачен
+        core.subscribe("hr.payroll.accrued", on_payroll_accrued)
+        core.subscribe("hr.payroll.paid", on_payroll_paid)
+        # sales → финансы (Р5): сделка отгружена → признание выручки (accrual по отгрузке)
+        core.subscribe("sales.deal.handoff", on_deal_handoff)
         core.register_widget(Widget("finance", "Финансы", source="finance.payments"))
 
 

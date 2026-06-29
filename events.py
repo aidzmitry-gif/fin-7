@@ -328,3 +328,113 @@ async def on_po_drafted(payload: dict, ctx) -> None:
             counterparty_ref=str(supplier_id) if supplier_id is not None else None,
         )
     )
+
+
+# ─────────────────────── HR: ФОТ ───────────────────────
+
+
+async def on_payroll_accrued(payload: dict, ctx) -> None:
+    """HR начислил зарплату → платёж-обязательство (hr → finance).
+
+    Подписка на ``hr.payroll.accrued``. Контракт зафиксирован HR 2026-06-28, НЕ менять форму:
+    ``{employee_id, employee_name, period:"YYYY-MM", amount_byn:str(BYN), entity_ref:"payroll:<id>"}``.
+    Пишем ``Payment(kind='payroll', status='pending')`` — ФОТ отражается как обязательство-отток.
+    """
+    if ctx is None:
+        return
+    amount = _to_decimal(payload.get("amount_byn"))
+    if amount <= 0:
+        return
+    entity_ref = payload.get("entity_ref", "")
+    employee_name = payload.get("employee_name", "")
+    period = payload.get("period", "")
+    ctx.session.add(
+        Payment(
+            ref=entity_ref,
+            amount=amount,
+            status="pending",
+            kind="payroll",
+            description=f"ФОТ {employee_name} {period}",
+            entity_ref=entity_ref,
+        )
+    )
+
+
+async def on_payroll_paid(payload: dict, ctx) -> None:
+    """HR выплатил зарплату → закрыть платёж по entity_ref (hr → finance).
+
+    Подписка на ``hr.payroll.paid``. Контракт: ``{employee_id, period, amount_byn, entity_ref}``.
+    Находим Payment по ``entity_ref`` и ``kind='payroll'`` → переводим в ``paid``.
+    Не найден → пропустить (honest-empty, HR может быть быстрее finance).
+    """
+    if ctx is None:
+        return
+    from sqlalchemy import select
+
+    entity_ref = payload.get("entity_ref", "")
+    if not entity_ref:
+        return
+    row = (
+        await ctx.session.execute(
+            select(Payment).where(
+                Payment.entity_ref == entity_ref,
+                Payment.kind == "payroll",
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return  # honest-empty: accrued не пришло раньше paid
+    row.status = "paid"
+
+
+# ─────────────────────── Sales: признание выручки (accrual) ───────────────────────
+
+
+async def on_deal_handoff(payload: dict, ctx) -> None:
+    """Сделка отгружена → признание выручки (accrual по отгрузке, sales → finance).
+
+    Подписка на ``sales.deal.handoff``. Payload несёт ``amount`` (float, sell-total BYN);
+    оборачиваем ``Decimal(str())`` — float-drift недопустим для выручки собственника.
+
+    kind=``revenue_recognized`` — ОТДЕЛЬНЫЙ от ``receivable`` (cash-invoice):
+    summary.py и aging работают с ``receivable`` (cash-basis), P&L — с ``revenue_recognized``
+    (accrual-basis). Смешение = двойной счёт выручки.
+
+    Идемпотентность: повтор handoff по той же сделке НЕ задваивает проводку
+    (entity_ref="deal:<deal_id>" + kind="revenue_recognized").
+
+    ⚠ ACCRUAL подтверждён собственником 2026-06-28.
+    """
+    if ctx is None:
+        return
+    deal_id = payload.get("deal_id")
+    amount = _to_decimal(payload.get("amount"))
+    if amount <= 0 or deal_id is None:
+        return
+
+    from sqlalchemy import select
+
+    entity_ref = f"deal:{deal_id}"
+    existing = (
+        await ctx.session.execute(
+            select(Payment).where(
+                Payment.entity_ref == entity_ref,
+                Payment.kind == "revenue_recognized",
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return  # идемпотентность: один handoff → одна проводка выручки
+
+    number = payload.get("number", "")
+    ctx.session.add(
+        Payment(
+            ref=f"handoff:{deal_id}",
+            amount=amount,
+            status="pending",
+            kind="revenue_recognized",
+            deal_id=deal_id,
+            entity_ref=entity_ref,
+            description=f"Выручка сделка {number}",
+        )
+    )

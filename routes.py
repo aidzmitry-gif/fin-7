@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,6 +128,68 @@ async def reconcile_1c(
     from modules.finance.reconcile import reconcile_with_onec
 
     return await reconcile_with_onec(session, getattr(core.services, "onec", None))
+
+
+# ───────────────────────── P&L (Р5) ─────────────────────────
+
+
+@router.get("/pnl")
+async def get_pnl(
+    period_from: str | None = None,
+    period_to: str | None = None,
+    format: str | None = None,  # noqa: A002 — shadowing built-in ok для query-param
+    fmt: str | None = None,  # обратная совместимость: ?fmt=csv
+    session: AsyncSession = Depends(get_session),
+):
+    """P&L за период (accrual-basis). Все суммы — строки BYN (Decimal, без float-дрейфа).
+
+    ``period_from`` / ``period_to`` — ISO-даты; некорректный формат → 400.
+    ``?format=csv`` (или ``?fmt=csv``) — CSV-выгрузка для скачивания.
+
+    Источник выручки: ``kind=revenue_recognized`` (accrual по отгрузке, ``sales.deal.handoff``),
+    НЕ ``receivable`` (кассовые счета). Summary/aging по-прежнему работают с ``receivable``.
+    """
+    from modules.finance.pnl import pnl_report
+
+    # Валидация дат: некорректная ISO → 400
+    from_dt = _safe_date(period_from)
+    to_dt = _safe_date(period_to)
+    if period_from and from_dt is None:
+        raise HTTPException(status_code=400, detail=f"Некорректная дата period_from: {period_from!r}")
+    if period_to and to_dt is None:
+        raise HTTPException(status_code=400, detail=f"Некорректная дата period_to: {period_to!r}")
+
+    data = await pnl_report(session, from_dt, to_dt)
+
+    csv_requested = (format or fmt) == "csv"
+    if csv_requested:
+        period_label = f"{period_from or 'начало'} — {period_to or 'сейчас'}"
+        lines = [f"Показатель,Сумма BYN,Период {period_label}"]
+        for label, key in [
+            ("Выручка (признанная)", "revenue"),
+            ("Себестоимость (landed)", "cogs_gross"),
+            ("Компенсации по претензиям", "cogs_claim_refund"),
+            ("Себестоимость (нетто)", "cogs_net"),
+            ("Валовая прибыль", "gross_profit"),
+            ("Фрахт (брутто)", "freight_gross"),
+            ("Возврат фрахта", "freight_refund"),
+            ("Фрахт (нетто)", "freight_net"),
+            ("ФОТ", "payroll"),
+            ("Прочие операционные (opex)", "opex"),
+            ("Налоги", "tax"),
+            ("Банковские расходы", "bank_fee"),
+            ("Операционная прибыль", "operating_profit"),
+        ]:
+            lines.append(f"{label},{data[key]}")
+        csv_body = "\n".join(lines) + "\n"
+        fn = f"pnl_{period_from or 'all'}_{period_to or 'now'}.csv"
+        return Response(
+            content=csv_body,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={fn}"},
+        )
+
+    return data
 
 
 def _safe_date(raw: str | None) -> date | None:
@@ -306,9 +368,7 @@ async def get_payment(payment_id: int, session: AsyncSession = Depends(get_sessi
     ).scalars().all()
     allocated = sum((Decimal(str(a.amount)) for a in allocs), Decimal("0"))
     out = _enrich(obj, allocated)
-    out["allocations"] = [
-        AllocationOut.model_validate(a).model_dump() for a in allocs
-    ]
+    out["allocations"] = [AllocationOut.model_validate(a).model_dump() for a in allocs]
     return out
 
 

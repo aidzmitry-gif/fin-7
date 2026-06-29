@@ -45,6 +45,10 @@ class Payment(Base):
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("finance.bank_account.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Р5: ссылка-провенанс для идемпотентности (например "deal:42", "payroll:7")
+    entity_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    # Р5: краткое описание проводки (ФОТ Иванов 2026-06, Выручка сделка СД-12)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

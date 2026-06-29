@@ -84,3 +84,21 @@ class BankAccountOut(BaseModel):
     opening_balance: float
     opening_at: date | None = None
     is_active: bool
+
+
+# ───────────────────────── Р5: P&L ─────────────────────────
+
+
+class PnlOut(BaseModel):
+    """Отчёт о прибылях и убытках за период (BYN, строки для точности)."""
+
+    period_from: str
+    period_to: str
+    revenue: str
+    cogs: str
+    freight: str
+    payroll: str
+    opex: str
+    tax: str
+    bank_fee: str
+    operating_profit: str
