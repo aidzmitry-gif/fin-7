@@ -21,6 +21,7 @@ from modules.finance.schemas import (
     PaymentDetail,
     PaymentOut,
     StatusUpdate,
+    money_str,
 )
 from modules.finance.summary import finance_summary
 
@@ -337,7 +338,7 @@ async def list_bank_accounts(
             "code": a.code,
             "title": a.title,
             "currency": a.currency,
-            "opening_balance": float(a.opening_balance),
+            "opening_balance": money_str(a.opening_balance),
             "opening_at": a.opening_at,
             "is_active": bool(a.is_active),
         }
@@ -371,7 +372,7 @@ async def create_bank_account(
         "code": obj.code,
         "title": obj.title,
         "currency": obj.currency,
-        "opening_balance": float(obj.opening_balance),
+        "opening_balance": money_str(obj.opening_balance),
         "opening_at": obj.opening_at,
         "is_active": bool(obj.is_active),
     }
@@ -403,7 +404,7 @@ async def update_bank_account(
         "code": obj.code,
         "title": obj.title,
         "currency": obj.currency,
-        "opening_balance": float(obj.opening_balance),
+        "opening_balance": money_str(obj.opening_balance),
         "opening_at": obj.opening_at,
         "is_active": bool(obj.is_active),
     }
@@ -435,7 +436,7 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
     return {
         "id": p.id,
         "ref": p.ref,
-        "amount": float(p.amount),
+        "amount": money_str(p.amount),
         "status": p.status,
         "kind": p.kind,
         "due_date": p.due_date,
@@ -443,7 +444,7 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
         "deal_id": p.deal_id,
         "counterparty_ref": p.counterparty_ref,
         "account_id": p.account_id,
-        "outstanding": float(outstanding),
+        "outstanding": money_str(outstanding),
         "is_overdue": is_overdue,
     }
 
