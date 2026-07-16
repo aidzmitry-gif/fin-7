@@ -180,16 +180,20 @@ async def on_landed_cost(payload: dict, ctx) -> None:
 async def on_claim_resolved(payload: dict, ctx) -> None:
     """Закупки урегулировали претензию к поставщику → компенсация-приток (procurement → finance).
 
-    Подписка на ``procurement.claim.resolved``. При ``resolution='resolved'`` и положительной
+    Подписка на ``procurement.claim.resolved``. При ``status='resolved'`` и положительной
     ``amount_byn`` пишем ``Payment(kind='claim_refund', amount=+amount_byn, ...)`` — приток от
     поставщика против landed-затрат. ``rejected``/None/ноль — игнор.
+
+    ⚠ Статус урегулирования — в поле ``status`` ('resolved'/'rejected'), а НЕ в ``resolution``
+    (это свободный текст «как урегулировано», ``SupplierClaim.resolution``). Сверять по ``status``,
+    иначе на реальном событии закупок приток молча теряется (деньги собственника, PLATFORM #1).
 
     ⚠ Контракт-фриз: ``amount_byn`` приходит СТРОКОЙ и УЖЕ В BYN — НЕ конвертируем через FX
     (double-convert = порча денег). ``supplier_id`` (int) — ручка контрагента (нет UNP/MDM).
     """
     if ctx is None:
         return
-    if payload.get("resolution") != "resolved":
+    if payload.get("status") != "resolved":
         return
     amount = _to_decimal(payload.get("amount_byn"))
     if amount <= 0:
