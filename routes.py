@@ -525,7 +525,13 @@ async def update_payment(
     if payload.status == "paid":
         obj.paid_at = datetime.now(UTC)
         core.event_bus.emit(
-            session, "finance.payment.paid", {"ref": obj.ref, "entity_ref": f"payment:{obj.id}"}
+            session,
+            "finance.payment.paid",
+            {
+                "ref": obj.ref,
+                "deal_id": obj.deal_id,
+                "entity_ref": f"payment:{obj.id}",
+            },
         )
     await session.commit()
     await session.refresh(obj)
@@ -581,7 +587,11 @@ async def create_allocation(
             core.event_bus.emit(
                 session,
                 "finance.payment.paid",
-                {"ref": payment.ref, "entity_ref": f"payment:{payment.id}"},
+                {
+                    "ref": payment.ref,
+                    "deal_id": payment.deal_id,
+                    "entity_ref": f"payment:{payment.id}",
+                },
             )
     elif total > 0:
         payment.status = "partial"
