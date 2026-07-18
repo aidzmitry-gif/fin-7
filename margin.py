@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.finance.models import Payment
+from modules.finance.schemas import money_str
 
 UNATTRIBUTED_DEAL = "_unattributed_"
 UNATTRIBUTED_CP = "_unattributed_"
@@ -37,13 +38,13 @@ def _row(key, agg: dict[str, Decimal]) -> dict:
     landed = agg["landed"] - agg["claim_refund"]  # компенсация уменьшает COGS
     net_freight = agg["freight"] + agg["freight_refund"]
     gross = revenue - landed - net_freight
-    pct = float(gross / revenue * 100) if revenue > 0 else None
+    pct = float(gross / revenue * 100) if revenue > 0 else None  # pct — процент, НЕ деньги
     return {
         "key": key,
-        "revenue": float(revenue),
-        "landed": float(landed),
-        "freight": float(net_freight),
-        "gross": float(gross),
+        "revenue": money_str(revenue),
+        "landed": money_str(landed),
+        "freight": money_str(net_freight),
+        "gross": money_str(gross),
         "pct": pct,
     }
 
@@ -68,8 +69,9 @@ async def _grouped(session: AsyncSession, group_field) -> list[dict]:
         if p.kind in slot:
             slot[p.kind] += Decimal(str(p.amount))
     result = [_row(k if k is not None else None, v) for k, v in by.items()]
-    # сортируем по убыванию валовой прибыли; неатрибутированные в конец независимо от gross
-    result.sort(key=lambda r: (r["key"] is None, -r["gross"]))
+    # сортируем по убыванию валовой прибыли; неатрибутированные в конец независимо от gross.
+    # gross теперь строка BYN — сортируем по Decimal(gross), не по строке.
+    result.sort(key=lambda r: (r["key"] is None, -Decimal(r["gross"])))
     return result
 
 
@@ -195,11 +197,11 @@ async def reconcile_deal_margin(
 
     return {
         "deal_id": deal_id,
-        "finance_landed": float(finance_landed),
-        "facade_landed": (float(facade_landed) if facade_landed is not None else None),
-        "delta": (float(delta) if delta is not None else None),
-        "revenue": float(revenue),
-        "gross_finance": float(gross_finance),
+        "finance_landed": money_str(finance_landed),
+        "facade_landed": (money_str(facade_landed) if facade_landed is not None else None),
+        "delta": (money_str(delta) if delta is not None else None),
+        "revenue": money_str(revenue),
+        "gross_finance": money_str(gross_finance),
         "level": "sku_aggregate",
         "source_facade_available": source_facade_available,
         "currency": "BYN",

@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.finance.models import Payment
+from modules.finance.schemas import money_str
 
 _KINDS = ("receivable", "freight", "freight_refund", "landed", "claim_refund", "po_planned")
 
@@ -54,7 +55,7 @@ async def _paid_receivable(session: AsyncSession) -> Decimal:
 
 
 async def finance_summary(session: AsyncSession) -> dict:
-    """Сводка: маржа по фактам + касса (ДДС-lite). Все суммы — ``float`` (BYN) на границе API."""
+    """Сводка: маржа по фактам + касса (ДДС-lite). Money — ``str`` BYN; ``pct`` — процент (float)."""
     by_kind = await _sum_by_kind(session)
     paid_recv = await _paid_receivable(session)
 
@@ -77,30 +78,34 @@ async def finance_summary(session: AsyncSession) -> dict:
     outflow = freight + landed
     net_cash = inflow - outflow
 
-    f = lambda d: float(d)  # noqa: E731 — узкий конвертер Decimal→float на границе ответа
+    # money — строкой BYN (см. money_str); pct — процент, НЕ деньги, остаётся float
     return {
         "currency": "BYN",
         "margin": {
-            "revenue": f(revenue),
-            "landed": f(net_landed),  # уже с учётом claim_refund
-            "landed_gross": f(landed),  # для UI — справочно «грязный» landed
-            "claim_refund": f(claim_refund),
-            "freight": f(net_freight),
-            "gross": f(gross),
+            "revenue": money_str(revenue),
+            "landed": money_str(net_landed),  # уже с учётом claim_refund
+            "landed_gross": money_str(landed),  # для UI — справочно «грязный» landed
+            "claim_refund": money_str(claim_refund),
+            "freight": money_str(net_freight),
+            "gross": money_str(gross),
             "pct": pct,
         },
         "cash": {
-            "inflow": f(inflow),
-            "outflow": f(outflow),
-            "net": f(net_cash),
-            "received": f(paid_recv),
-            "pending_receivable": f(revenue - paid_recv),
-            "freight_refund": f(refund_inflow),
+            "inflow": money_str(inflow),
+            "outflow": money_str(outflow),
+            "net": money_str(net_cash),
+            "received": money_str(paid_recv),
+            "pending_receivable": money_str(revenue - paid_recv),
+            "freight_refund": money_str(refund_inflow),
         },
         "costs": [
-            {"kind": "landed", "label": "Себестоимость (landed)", "amount": f(landed)},
-            {"kind": "freight", "label": "Фрахт", "amount": f(freight)},
-            {"kind": "freight_refund", "label": "Возврат фрахта", "amount": f(refund)},
-            {"kind": "claim_refund", "label": "Компенсация по претензии", "amount": f(claim_refund)},
+            {"kind": "landed", "label": "Себестоимость (landed)", "amount": money_str(landed)},
+            {"kind": "freight", "label": "Фрахт", "amount": money_str(freight)},
+            {"kind": "freight_refund", "label": "Возврат фрахта", "amount": money_str(refund)},
+            {
+                "kind": "claim_refund",
+                "label": "Компенсация по претензии",
+                "amount": money_str(claim_refund),
+            },
         ],
     }

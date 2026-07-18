@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.finance.aging import _payments_outstanding
+from modules.finance.schemas import money_str
 
 Mode = Literal["week", "day"]
 
@@ -141,10 +142,10 @@ async def cashflow_forecast(
         rows.append(
             {
                 "bucket_start": w.isoformat(),
-                "inflow": float(inflow),
-                "outflow": float(outflow),
-                "net": float(net),
-                "cumulative": float(cumulative),
+                "inflow": money_str(inflow),
+                "outflow": money_str(outflow),
+                "net": money_str(net),
+                "cumulative": money_str(cumulative),
             }
         )
     return {
@@ -153,12 +154,12 @@ async def cashflow_forecast(
         "mode": mode,
         "bucket_size_days": bucket_size.days,
         "account_id": account_id,
-        "opening_balance": float(opening),
+        "opening_balance": money_str(opening),
         "buckets": rows,
         # ponytail-совместимость: оставляем поле `weeks` как алиас на buckets, чтобы
         # не сломать прошлый фронт (он смотрит на week_start). Поле для week-mode.
         "weeks": (
             [{**r, "week_start": r["bucket_start"]} for r in rows] if mode == "week" else []
         ),
-        "not_dated": {"inflow": float(not_dated_in), "outflow": float(not_dated_out)},
+        "not_dated": {"inflow": money_str(not_dated_in), "outflow": money_str(not_dated_out)},
     }

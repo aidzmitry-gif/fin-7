@@ -9,8 +9,8 @@ honest-empty с флагом ``source_available=False`` (НЕ ошибка, эк
 ⚠ Круг 5 харднинг (К5-1): сопоставление через **список-по-ключу**, не словарь —
 иначе дубли `ref+counterparty_ref` (исправления, пересчёты, отсутствие УНП у пары
 платежей с одинаковым ref) схлопываются и теряются. Сумма парсится **безопасно**
-(локализация «100,00» из 1С + Decimal от строки + fail-soft 0 на мусор), float
-сейчас в выходе остался (money-в-API — отдельный NEEDS-ARB на круге 5).
+(локализация «100,00» из 1С + Decimal от строки + fail-soft 0 на мусор). Суммы в выходе —
+**строки BYN** (`money_str`): деньги собственника не через float (приоритет №1 PLATFORM.md).
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.finance.models import Payment
+from modules.finance.schemas import money_str
 
 
 def _erp_key(p: Payment) -> str:
@@ -90,17 +91,17 @@ async def reconcile_with_onec(session: AsyncSession, gateway) -> dict:
         pair_count = min(len(erp_list), len(onec_list))
         for p in erp_list[:pair_count]:
             matched.append(
-                {"ref": p.ref, "amount": float(p.amount), "counterparty_ref": p.counterparty_ref}
+                {"ref": p.ref, "amount": money_str(p.amount), "counterparty_ref": p.counterparty_ref}
             )
         for p in erp_list[pair_count:]:
             only_in_erp.append(
-                {"ref": p.ref, "amount": float(p.amount), "counterparty_ref": p.counterparty_ref}
+                {"ref": p.ref, "amount": money_str(p.amount), "counterparty_ref": p.counterparty_ref}
             )
         for r in onec_list[pair_count:]:
             only_in_1c.append(
                 {
                     "ref": r.get("ref"),
-                    "amount": _safe_amount(r.get("amount", 0)),
+                    "amount": money_str(_safe_amount(r.get("amount", 0))),
                     "counterparty_ref": r.get("counterparty_ref"),
                 }
             )

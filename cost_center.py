@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.finance.models import Payment
+from modules.finance.schemas import money_str
 
 # ponytail: при росте — таблица finance.cost_center и роли «владельца центра» в RBAC.
 DEFAULT_BY_KIND = {
@@ -67,7 +68,11 @@ async def group_by_cost_center(
         "to": to.isoformat() if to else None,
         "currency": "BYN",
         "centers": [
-            {"name": name, "income": float(by[name]["income"]), "expense": float(by[name]["expense"])}
+            {
+                "name": name,
+                "income": money_str(by[name]["income"]),
+                "expense": money_str(by[name]["expense"]),
+            }
             for name in sorted(by, key=lambda n: -float(by[n]["expense"]))
         ],
     }

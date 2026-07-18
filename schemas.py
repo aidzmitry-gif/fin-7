@@ -1,14 +1,40 @@
-"""Pydantic-схемы модуля Finance."""
+"""Pydantic-схемы модуля Finance.
+
+Деньги на API-границе — **строки** (не float): float дрейфует копейки на собственнике
+(приоритет №1 PLATFORM.md). Единая точка квантования — ``money_str`` (Decimal → "0.01").
+``MoneyStr``/``OptMoneyStr`` (``BeforeValidator``) принимают ORM ``Decimal``, JSON-число
+(фронт шлёт number на allocation/bank-account) и уже-строку — и всегда отдают строку BYN.
+"""
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict
+
+
+def money_str(value: object) -> str:
+    """Денежное значение (Decimal/float/int/str) → строка BYN, 2 знака.
+
+    Единая точка квантования для API-границы Finance — используется и схемами, и компут-
+    модулями (summary/aging/cashflow/margin/cost_center/reconcile), чтобы копейки не расходились.
+    """
+    return str(Decimal(str(value)).quantize(Decimal("0.01")))
+
+
+def _opt_money_str(value: object) -> str | None:
+    return None if value is None else money_str(value)
+
+
+# str на API; BeforeValidator конвертирует вход (Decimal ORM / JSON-число / строка) → строку BYN.
+MoneyStr = Annotated[str, BeforeValidator(money_str)]
+OptMoneyStr = Annotated[str | None, BeforeValidator(_opt_money_str)]
 
 
 class PaymentCreate(BaseModel):
     ref: str
-    amount: float = 0
+    amount: MoneyStr = "0.00"
     status: str = "pending"
     kind: str = "receivable"
     due_date: date | None = None
@@ -22,7 +48,7 @@ class PaymentOut(BaseModel):
 
     id: int
     ref: str
-    amount: float
+    amount: MoneyStr
     status: str
     kind: str = "receivable"
     due_date: date | None = None
@@ -31,7 +57,7 @@ class PaymentOut(BaseModel):
     counterparty_ref: str | None = None
     account_id: int | None = None
     # Вычисляемые поля (заполняются в роутере):
-    outstanding: float | None = None  # остаток к поступлению (amount − sum allocations)
+    outstanding: OptMoneyStr = None  # остаток к поступлению (amount − sum allocations)
     is_overdue: bool | None = None  # status in (pending, partial) and due_date < today
 
 
@@ -40,7 +66,7 @@ class StatusUpdate(BaseModel):
 
 
 class AllocationCreate(BaseModel):
-    amount: float
+    amount: MoneyStr
 
 
 class AllocationOut(BaseModel):
@@ -48,7 +74,7 @@ class AllocationOut(BaseModel):
 
     id: int
     payment_id: int
-    amount: float
+    amount: MoneyStr
     allocated_at: datetime
 
 
@@ -63,14 +89,14 @@ class BankAccountCreate(BaseModel):
     code: str
     title: str
     currency: str = "BYN"
-    opening_balance: float = 0
+    opening_balance: MoneyStr = "0.00"
     opening_at: date | None = None
 
 
 class BankAccountUpdate(BaseModel):
     title: str | None = None
     is_active: bool | None = None
-    opening_balance: float | None = None
+    opening_balance: OptMoneyStr = None
     opening_at: date | None = None
 
 
@@ -81,7 +107,7 @@ class BankAccountOut(BaseModel):
     code: str
     title: str
     currency: str
-    opening_balance: float
+    opening_balance: MoneyStr
     opening_at: date | None = None
     is_active: bool
 

@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from modules.finance.models import Payment, PaymentAllocation
+from modules.finance.schemas import money_str
 
 AR_KINDS = ("receivable",)
 AP_KINDS = ("freight", "landed")
@@ -76,8 +77,8 @@ async def _side(
         buckets[_bucket(p.due_date, today)] += outstanding
     total = sum(buckets.values(), Decimal("0"))
     return {
-        "buckets": {b: float(buckets[b]) for b in BUCKETS},
-        "total": float(total),
+        "buckets": {b: money_str(buckets[b]) for b in BUCKETS},
+        "total": money_str(total),
     }
 
 

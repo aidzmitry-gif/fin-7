@@ -180,25 +180,39 @@ async def on_landed_cost(payload: dict, ctx) -> None:
 async def on_claim_resolved(payload: dict, ctx) -> None:
     """Закупки урегулировали претензию к поставщику → компенсация-приток (procurement → finance).
 
-    Подписка на ``procurement.claim.resolved``. При ``resolution='resolved'`` и положительной
+    Подписка на ``procurement.claim.resolved``. При ``status='resolved'`` и положительной
     ``amount_byn`` пишем ``Payment(kind='claim_refund', amount=+amount_byn, ...)`` — приток от
     поставщика против landed-затрат. ``rejected``/None/ноль — игнор.
+
+    ⚠ Статус урегулирования — в поле ``status`` ('resolved'/'rejected'), а НЕ в ``resolution``
+    (это свободный текст «как урегулировано», ``SupplierClaim.resolution``). Сверять по ``status``,
+    иначе на реальном событии закупок приток молча теряется (деньги собственника, PLATFORM #1).
 
     ⚠ Контракт-фриз: ``amount_byn`` приходит СТРОКОЙ и УЖЕ В BYN — НЕ конвертируем через FX
     (double-convert = порча денег). ``supplier_id`` (int) — ручка контрагента (нет UNP/MDM).
     """
     if ctx is None:
         return
-    if payload.get("resolution") != "resolved":
+    if payload.get("status") != "resolved":
         return
     amount = _to_decimal(payload.get("amount_byn"))
     if amount <= 0:
         return
     supplier_id = payload.get("supplier_id")
     entity_ref = payload.get("entity_ref") or f"claim:{payload.get('claim_id', '')}"
+    ref = f"claim:{entity_ref}"
+    # Идемпотентность (S1): шина at-least-once → повтор procurement.claim.resolved НЕ должен
+    # задваивать приток-компенсацию (деньги собственника, PLATFORM #1). Ключ — ref + kind.
+    from sqlalchemy import select
+    if (
+        await ctx.session.execute(
+            select(Payment.id).where(Payment.ref == ref, Payment.kind == "claim_refund")
+        )
+    ).scalars().first() is not None:
+        return
     ctx.session.add(
         Payment(
-            ref=f"claim:{entity_ref}",
+            ref=ref,
             amount=amount,  # положительная — приток-компенсация
             status="pending",
             kind="claim_refund",
