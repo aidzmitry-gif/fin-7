@@ -200,9 +200,19 @@ async def on_claim_resolved(payload: dict, ctx) -> None:
         return
     supplier_id = payload.get("supplier_id")
     entity_ref = payload.get("entity_ref") or f"claim:{payload.get('claim_id', '')}"
+    ref = f"claim:{entity_ref}"
+    # Идемпотентность (S1): шина at-least-once → повтор procurement.claim.resolved НЕ должен
+    # задваивать приток-компенсацию (деньги собственника, PLATFORM #1). Ключ — ref + kind.
+    from sqlalchemy import select
+    if (
+        await ctx.session.execute(
+            select(Payment.id).where(Payment.ref == ref, Payment.kind == "claim_refund")
+        )
+    ).scalars().first() is not None:
+        return
     ctx.session.add(
         Payment(
-            ref=f"claim:{entity_ref}",
+            ref=ref,
             amount=amount,  # положительная — приток-компенсация
             status="pending",
             kind="claim_refund",
