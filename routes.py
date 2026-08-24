@@ -10,13 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
-from modules.finance.models import BankAccount, Payment, PaymentAllocation
+from modules.finance.allocation import apply_allocation, sum_allocations
+from modules.finance.models import BankAccount, BankTransaction, Payment, PaymentAllocation
 from modules.finance.schemas import (
     AllocationCreate,
     AllocationOut,
     BankAccountCreate,
     BankAccountOut,
     BankAccountUpdate,
+    BankManualMatch,
+    BankTxOut,
     PaymentCreate,
     PaymentDetail,
     PaymentOut,
@@ -413,17 +416,6 @@ async def update_bank_account(
 # ───────────────────────── Платежи ─────────────────────────
 
 
-async def _sum_allocations(session: AsyncSession, payment_id: int) -> Decimal:
-    total = (
-        await session.execute(
-            select(func.coalesce(func.sum(PaymentAllocation.amount), 0)).where(
-                PaymentAllocation.payment_id == payment_id
-            )
-        )
-    ).scalar_one()
-    return Decimal(str(total))
-
-
 def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
     """ORM Payment → словарь для PaymentOut с вычисляемыми outstanding/is_overdue."""
     today = today or date.today()
@@ -529,7 +521,7 @@ async def update_payment(
         )
     await session.commit()
     await session.refresh(obj)
-    allocated = await _sum_allocations(session, payment_id)
+    allocated = await sum_allocations(session, payment_id)
     return _enrich(obj, allocated)
 
 
@@ -553,38 +545,73 @@ async def create_allocation(
     amt = Decimal(str(payload.amount))
     if amt <= 0:
         raise HTTPException(status_code=400, detail="Сумма поступления должна быть > 0")
-    alloc = PaymentAllocation(payment_id=payment_id, amount=amt)
-    session.add(alloc)
-    await session.flush()
-    total = await _sum_allocations(session, payment_id)
-    target = Decimal(str(payment.amount))
-    outstanding_after = target - total
-    # FIN-C3: эмит на КАЖДОЕ поступление (closes мёртвая подписка office на received).
-    # Семантика: received = любое поступление (вкл. частичное); paid = полное закрытие.
-    # Деньги — СТРОКОЙ (см. FIN-A2): float дрейфует копейки на собственнике.
-    core.event_bus.emit(
-        session,
-        "finance.payment.received",
-        {
-            "ref": payment.ref,
-            "amount": str(amt),
-            "entity_ref": f"payment:{payment.id}",
-            "deal_id": payment.deal_id,
-            "counterparty_ref": payment.counterparty_ref,
-            "outstanding": str(outstanding_after if outstanding_after > 0 else Decimal("0")),
-        },
-    )
-    if total >= target:
-        if payment.status != "paid":
-            payment.status = "paid"
-            payment.paid_at = datetime.now(UTC)
-            core.event_bus.emit(
-                session,
-                "finance.payment.paid",
-                {"ref": payment.ref, "entity_ref": f"payment:{payment.id}"},
-            )
-    elif total > 0:
-        payment.status = "partial"
+    # Единый путь проведения (ручной ввод и банк-импорт): apply_allocation считает статус
+    # и эмитит finance.payment.received (+ .paid при полном закрытии).
+    alloc = await apply_allocation(session, core.event_bus, payment, amt)
     await session.commit()
     await session.refresh(alloc)
     return alloc
+
+
+# ───────────────────────── Банк: входящие зачисления (Альфа host-to-host) ─────────────────────────
+
+
+@router.post("/bank/sync")
+async def bank_sync(
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+):
+    """Опросить банк, идемпотентно провести зачисления, сматчить к счетам (Альфа, слайс 1).
+
+    Источник — ``core.services.bank`` (нет кредов → пусто, честная деградация). Под гейтом
+    модуля ``finance`` (аноним/чужая роль → 403 middleware). Возврат — сводка sync.
+    """
+    from modules.finance.bank_ingest import sync_incoming
+
+    gateway = getattr(core.services, "bank", None)
+    try:
+        summary = await sync_incoming(session, gateway, core.event_bus)
+    except Exception as exc:  # noqa: BLE001 — ошибку банка отдаём вызывающему как 502, не 500
+        raise HTTPException(status_code=502, detail=f"Банк недоступен: {exc}") from exc
+    await session.commit()
+    return {"ok": True, **summary}
+
+
+@router.get("/bank/transactions", response_model=list[BankTxOut])
+async def list_bank_transactions(
+    status: str | None = None, session: AsyncSession = Depends(get_session)
+):
+    """Ledger зачислений; ``?status=unmatched`` — очередь «разобрать вручную»."""
+    q = select(BankTransaction).order_by(BankTransaction.id.desc())
+    if status:
+        q = q.where(BankTransaction.match_status == status)
+    return (await session.execute(q)).scalars().all()
+
+
+@router.post("/bank/transactions/{tx_id}/match", response_model=BankTxOut)
+async def match_bank_transaction(
+    tx_id: int,
+    payload: BankManualMatch,
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+):
+    """Ручная привязка зачисления к счёту (очередь). Проводит поступление тем же путём."""
+    tx = await session.get(BankTransaction, tx_id)
+    if tx is None:
+        raise HTTPException(status_code=404, detail="Зачисление не найдено")
+    if tx.match_status in {"matched", "manual"}:
+        raise HTTPException(status_code=409, detail="Зачисление уже сматчено")
+    payment = await session.get(Payment, payload.payment_id)
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Счёт не найден")
+    amt = Decimal(str(tx.amount))
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="У зачисления нет суммы")
+    alloc = await apply_allocation(session, core.event_bus, payment, amt)
+    tx.match_status = "manual"
+    tx.payment_id = payment.id
+    tx.allocation_id = alloc.id
+    tx.note = None
+    await session.commit()
+    await session.refresh(tx)
+    return tx
