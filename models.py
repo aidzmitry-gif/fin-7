@@ -98,3 +98,39 @@ class PaymentAllocation(Base):
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
     allocated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BankTransaction(Base):
+    """Сырое входящее зачисление из банка (Альфа host-to-host) — ledger идемпотентности (0106).
+
+    Неизменяемый факт выписки. ``ext_id`` (идентификатор операции в банке) — **UNIQUE**:
+    повторный опрос НЕ задваивает зачисление (иначе деньги клиента проведутся дважды,
+    PLATFORM #1). Матчер (``bank_ingest``) связывает зачисление с открытым ``receivable``
+    по назначению платежа + УНП и проводит поступление; несматченное остаётся в очереди
+    «разобрать вручную» (``match_status='unmatched'``).
+    """
+
+    __tablename__ = "bank_transaction"
+    __table_args__ = {"schema": "finance"}
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ext_id: Mapped[str] = mapped_column(String(128), unique=True)  # идемпотентность опроса
+    occurred_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
+    currency: Mapped[str] = mapped_column(String(3), default="BYN", server_default="BYN")
+    payer_unp: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    payer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    purpose: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    account_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # matched (авто по назначению+УНП) · manual (сматчено человеком) · unmatched (очередь)
+    match_status: Mapped[str] = mapped_column(
+        String(16), default="unmatched", server_default="unmatched", index=True
+    )
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)  # причина для очереди
+    payment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("finance.payment.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    allocation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("finance.payment_allocation.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
