@@ -1,43 +1,24 @@
-"""FX-конвертация для мультивалютных входящих проводок.
-
-Базовая валюта хранения и расчётов — **BYN**. Если событие приходит в иной валюте,
-конвертируем в BYN с буфером (методика «Расчёт Китай»: +10% к курсу — страховка от
-дрейфа на горизонте поставки).
-
-``RATES`` — demo-константы (BYN-эквивалент за единицу). ⚠ Источник истины — НБРБ/1С;
-этот словарь — заглушка до интеграции (# ponytail: подключить курс из 1С/НБРБ-API).
-"""
+"""Pure conversion with an explicitly supplied rate; fetch dated quotes via nbrb."""
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 BASE = "BYN"
-FX_BUFFER = Decimal("1.10")  # +10% — согласовано с методикой Китая (docs/landed-cost.md)
-
-# ponytail: значения — demo; реальный курс должен приходить из 1С/НБРБ.
-RATES: dict[str, Decimal] = {
-    "BYN": Decimal("1.0"),
-    "USD": Decimal("3.30"),
-    "CNY": Decimal("0.45"),
-    "EUR": Decimal("3.60"),
-    "RUB": Decimal("0.035"),
-}
 
 
 class UnknownCurrency(ValueError):
     """Валюта не в таблице курсов — лучше упасть честно, чем сохранить мусор."""
 
 
-def to_byn(amount: Decimal | float | str | int, currency: str | None) -> Decimal:
-    """Сконвертировать сумму в BYN с применением FX-буфера.
-
-    BYN/None → возвращаем как есть (Decimal). Иначе ``amount × rate × buffer``.
-    """
+def to_byn(amount: Decimal | float | str | int, currency: str | None, *, rate=None) -> Decimal:
+    """Convert at the supplied BYN-per-unit rate, without a planning buffer."""
     amt = Decimal(str(amount))
     cur = (currency or BASE).upper()
     if cur == BASE:
         return amt
-    rate = RATES.get(cur)
     if rate is None:
-        raise UnknownCurrency(f"Курс для {cur} не задан — обновите fx.RATES или включите шлюз НБРБ")
-    return (amt * rate * FX_BUFFER).quantize(Decimal("0.01"))
+        raise UnknownCurrency(f"Для {cur} нужен официальный курс на дату из core.services.nbrb")
+    rate = Decimal(str(rate))
+    if not rate.is_finite() or rate <= 0:
+        raise UnknownCurrency("Некорректный курс")
+    return (amt * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

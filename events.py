@@ -9,8 +9,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from modules.finance.fx import BASE as BASE_CCY
-from modules.finance.fx import UnknownCurrency, to_byn
 from modules.finance.models import Payment
+from modules.finance.official_fx import event_amount
 
 
 def _parse_due_date(raw) -> date | None:
@@ -47,10 +47,14 @@ async def on_document_posted(payload: dict, ctx) -> None:
     if payload.get("kind") != "invoice" or ctx is None:
         return
     amount = _to_decimal(payload.get("amount"))
+    currency = (payload.get("currency") or BASE_CCY).strip().upper()
+    amount_byn = await event_amount(amount, currency, payload, ctx)
     ctx.session.add(
         Payment(
             ref=payload.get("number", ""),
-            amount=amount,
+            amount=amount_byn,
+            currency=currency,
+            amount_orig=amount if currency != BASE_CCY else None,
             status="pending",
             due_date=_parse_due_date(payload.get("due_date")),
             deal_id=payload.get("deal_id"),
@@ -62,7 +66,7 @@ async def on_document_posted(payload: dict, ctx) -> None:
         "finance.payment.created",
         {
             "ref": payload.get("number"),
-            "amount": str(amount),  # FIN-A2: деньги — строкой, не float
+            "amount": str(amount_byn),
             "deal_id": payload.get("deal_id"),
             "entity_ref": payload.get("entity_ref"),
         },
@@ -83,10 +87,7 @@ async def on_freight_cost(payload: dict, ctx) -> None:
         return
     ref = payload.get("ref") or payload.get("entity_ref") or ""
     currency = (payload.get("currency") or BASE_CCY).upper()
-    try:
-        amount_byn = to_byn(amount, currency)
-    except UnknownCurrency:
-        return  # неизвестная валюта → не падать в relay, пропустить (honest-empty)
+    amount_byn = await event_amount(amount, currency, payload, ctx)
     ctx.session.add(
         Payment(
             ref=f"freight:{ref}",
@@ -110,8 +111,8 @@ async def on_freight_refund(payload: dict, ctx) -> None:
     ``sum(amount)`` по фрахт-платежам даёт чистый фрахт, а ``kind`` хранит аудит-след.
 
     FIN-C2 (P3): шаблон FX — ``currency`` из payload (дефолт BYN), ``amount_byn`` через
-    fx.to_byn (с буфером для не-BYN), ``amount_orig`` сохраняем при не-BYN. Хранится
-    отрицательной. Неизвестная валюта → пропускаем (не падаем в relay).
+    официальный курс на дату события; ``amount_orig`` сохраняем при не-BYN.
+    Хранится отрицательной. Нет курса → ошибка, исходное событие остаётся для повтора.
     """
     if ctx is None:
         return
@@ -120,10 +121,7 @@ async def on_freight_refund(payload: dict, ctx) -> None:
         return
     ref = payload.get("entity_ref") or payload.get("shipment_code") or ""
     currency = (payload.get("currency") or BASE_CCY).upper()
-    try:
-        amount_byn = to_byn(amount, currency)
-    except UnknownCurrency:
-        return  # неизвестная валюта → не падать в relay
+    amount_byn = await event_amount(amount, currency, payload, ctx)
     ctx.session.add(
         Payment(
             ref=f"freight_refund:{ref}",
@@ -151,18 +149,16 @@ async def on_landed_cost(payload: dict, ctx) -> None:
     if ctx is None:
         return
     amount = _to_decimal(payload.get("amount"))
+    currency = (payload.get("currency") or BASE_CCY).strip().upper()
     if amount <= 0:
         amount = _to_decimal(payload.get("total_landed_byn"))
+        currency = BASE_CCY
     if amount <= 0:
         amount = _to_decimal(payload.get("unit_landed_cost_byn")) * _to_decimal(payload.get("qty"))
     if amount <= 0:
         return
     ref = payload.get("entity_ref") or payload.get("sku_code") or ""
-    currency = (payload.get("currency") or BASE_CCY).upper()
-    try:
-        amount_byn = to_byn(amount, currency)
-    except UnknownCurrency:
-        return
+    amount_byn = await event_amount(amount, currency, payload, ctx)
     ctx.session.add(
         Payment(
             ref=f"landed:{ref}",

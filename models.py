@@ -37,7 +37,7 @@ class Payment(Base):
     counterparty_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # центр затрат (0063): свободная строка из захардкоженного справочника cost_center.py
     cost_center: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # мультивалюта (0063): amount всегда в BYN (после конвертации с FX-буфером);
+    # мультивалюта (0063): amount всегда в BYN (официальный курс на дату операции);
     # amount_orig + currency — оригинал из payload (None при BYN-в-источнике)
     currency: Mapped[str] = mapped_column(String(3), default="BYN", server_default="BYN")
     amount_orig: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)

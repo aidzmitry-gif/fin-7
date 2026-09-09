@@ -41,6 +41,8 @@ class PaymentCreate(BaseModel):
     deal_id: int | None = None
     counterparty_ref: str | None = None
     account_id: int | None = None
+    currency: str = "BYN"
+    operation_date: date | None = None
 
 
 class PaymentOut(BaseModel):
@@ -56,6 +58,8 @@ class PaymentOut(BaseModel):
     deal_id: int | None = None
     counterparty_ref: str | None = None
     account_id: int | None = None
+    currency: str = "BYN"
+    amount_orig: OptMoneyStr = None
     # Вычисляемые поля (заполняются в роутере):
     outstanding: OptMoneyStr = None  # остаток к поступлению (amount − sum allocations)
     is_overdue: bool | None = None  # status in (pending, partial) and due_date < today
@@ -67,6 +71,8 @@ class StatusUpdate(BaseModel):
 
 class AllocationCreate(BaseModel):
     amount: MoneyStr
+    currency: str = "BYN"
+    operation_date: date | None = None
 
 
 class AllocationOut(BaseModel):

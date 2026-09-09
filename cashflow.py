@@ -66,7 +66,14 @@ async def _opening_balance(
     if account_id is not None:
         acc = await session.get(BankAccount, account_id)
         if acc is not None:
-            cashflow_opening += Decimal(str(acc.opening_balance))
+            opening = Decimal(str(acc.opening_balance))
+            if opening and (acc.currency or "BYN").strip().upper() != "BYN":
+                from core.services.nbrb import RateUnavailable, convert
+
+                if acc.opening_at is None:
+                    raise RateUnavailable("Укажите дату начального валютного остатка")
+                opening, _ = await convert(session, opening, acc.currency, acc.opening_at)
+            cashflow_opening += opening
     return cashflow_opening
 
 
