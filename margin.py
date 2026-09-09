@@ -5,7 +5,9 @@
 - landed = sum(``landed``) − sum(``claim_refund``) — компенсация поставщика уменьшает COGS;
 - net_freight = sum(``freight`` + ``freight_refund``) — возврат уменьшает фрахт;
 - gross = revenue − landed − net_freight;
-- pct = gross/revenue, ``None`` если выручки нет (honest-empty).
+- pct = gross/revenue, ``None`` если выручки нет (honest-empty);
+- если по группе есть выручка, но landed-проводок нет (``cogs_known=False``) — landed/gross/pct
+  = ``None`` (себестоимость не атрибутирована; не показываем завышенную прибыль как COGS=0).
 
 ``po_planned`` НЕ участвует в марже (только cashflow).
 
@@ -35,8 +37,26 @@ _MARGIN_KINDS = ("receivable", "landed", "freight", "freight_refund", "claim_ref
 
 def _row(key, agg: dict[str, Decimal]) -> dict:
     revenue = agg["receivable"]
-    landed = agg["landed"] - agg["claim_refund"]  # компенсация уменьшает COGS
     net_freight = agg["freight"] + agg["freight_refund"]
+    # Себестоимость атрибутирована к этой группе, только если есть landed-проводки.
+    # В проде landed payload идёт БЕЗ deal_id (контракт «PO обслуживает много сделок»),
+    # поэтому по сделке landed структурно = 0. Показывать gross=revenue−0−freight как валовую
+    # прибыль = фантомная прибыль (себестоимость выпадает) — PLATFORM #1. Честнее: gross/pct/landed
+    # = None + флаг cogs_known=False, чтобы UI показал «себестоимость неизвестна», а не завышенный %.
+    cogs_known = agg["landed"] > 0
+    # Гард только для реальных сделок/контрагентов; бакет «не атрибутировано» (key=None) и так
+    # явно помечен в UI и не претендует на маржу конкретной сделки.
+    if key is not None and revenue > 0 and not cogs_known:
+        return {
+            "key": key,
+            "revenue": money_str(revenue),
+            "landed": None,
+            "freight": money_str(net_freight),
+            "gross": None,
+            "pct": None,
+            "cogs_known": False,
+        }
+    landed = agg["landed"] - agg["claim_refund"]  # компенсация уменьшает COGS
     gross = revenue - landed - net_freight
     pct = float(gross / revenue * 100) if revenue > 0 else None  # pct — процент, НЕ деньги
     return {
@@ -46,6 +66,7 @@ def _row(key, agg: dict[str, Decimal]) -> dict:
         "freight": money_str(net_freight),
         "gross": money_str(gross),
         "pct": pct,
+        "cogs_known": True,
     }
 
 
@@ -69,9 +90,15 @@ async def _grouped(session: AsyncSession, group_field) -> list[dict]:
         if p.kind in slot:
             slot[p.kind] += Decimal(str(p.amount))
     result = [_row(k if k is not None else None, v) for k, v in by.items()]
-    # сортируем по убыванию валовой прибыли; неатрибутированные в конец независимо от gross.
-    # gross теперь строка BYN — сортируем по Decimal(gross), не по строке.
-    result.sort(key=lambda r: (r["key"] is None, -Decimal(r["gross"])))
+    # сортируем по убыванию валовой прибыли; строки без известного COGS (gross=None) и
+    # неатрибутированные (key=None) — в конец. gross — строка BYN или None.
+    result.sort(
+        key=lambda r: (
+            r["key"] is None,
+            r["gross"] is None,
+            -Decimal(r["gross"]) if r["gross"] is not None else Decimal("0"),
+        )
+    )
     return result
 
 

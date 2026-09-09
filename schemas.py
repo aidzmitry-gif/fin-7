@@ -112,6 +112,34 @@ class BankAccountOut(BaseModel):
     is_active: bool
 
 
+# ───────────────────────── Банк: входящие зачисления (Альфа) ─────────────────────────
+
+
+class BankTxOut(BaseModel):
+    """Строка ledger банковских зачислений (для очереди «разобрать вручную»)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    ext_id: str
+    occurred_on: date | None = None
+    amount: MoneyStr
+    currency: str = "BYN"
+    payer_unp: str | None = None
+    payer_name: str | None = None
+    purpose: str | None = None
+    account_code: str | None = None
+    match_status: str
+    note: str | None = None
+    payment_id: int | None = None
+
+
+class BankManualMatch(BaseModel):
+    """Ручная привязка зачисления к счёту (очередь «разобрать вручную»)."""
+
+    payment_id: int
+
+
 # ───────────────────────── Р5: P&L ─────────────────────────
 
 
