@@ -165,6 +165,9 @@ async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -
             session.add(row)
             unmatched += 1
             continue
+        from modules.finance.official_fx import bank_amount
+
+        amount = await bank_amount(session, row)
         payment, reason = await _match_candidate(session, tx, amount)
         if payment is not None:
             alloc = await apply_allocation(session, event_bus, payment, amount)

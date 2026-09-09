@@ -429,6 +429,8 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
         "id": p.id,
         "ref": p.ref,
         "amount": money_str(p.amount),
+        "currency": p.currency,
+        "amount_orig": money_str(p.amount_orig) if p.amount_orig is not None else None,
         "status": p.status,
         "kind": p.kind,
         "due_date": p.due_date,
@@ -486,9 +488,23 @@ async def get_payment(payment_id: int, session: AsyncSession = Depends(get_sessi
 @router.post("/payments", response_model=PaymentOut, status_code=201)
 async def create_payment(payload: PaymentCreate, session: AsyncSession = Depends(get_session)):
     """Зафиксировать платёж (lifecycle + провенанс — опционально)."""
+    from core.domain.models import AuditLog
+    from core.services import nbrb
+
+    currency = payload.currency.strip().upper()
+    if currency != "BYN" and payload.operation_date is None:
+        raise HTTPException(status_code=422, detail="Укажите дату валютной операции")
+    try:
+        amount, quote = await nbrb.convert(
+            session, payload.amount, currency, payload.operation_date or nbrb.today()
+        )
+    except nbrb.RateUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     obj = Payment(
         ref=payload.ref,
-        amount=Decimal(str(payload.amount)),
+        amount=amount,
+        currency=currency,
+        amount_orig=Decimal(payload.amount) if currency != "BYN" else None,
         status=payload.status,
         kind=payload.kind,
         due_date=payload.due_date,
@@ -497,6 +513,11 @@ async def create_payment(payload: PaymentCreate, session: AsyncSession = Depends
         account_id=payload.account_id,
     )
     session.add(obj)
+    await session.flush()
+    session.add(AuditLog(actor="finance", action="finance.fx.applied",
+                         entity_ref=f"payment:{obj.id}",
+                         detail={"amount_original": payload.amount,
+                                 "amount_byn": str(amount), "quote": quote}))
     await session.commit()
     await session.refresh(obj)
     return _enrich(obj, Decimal("0"))
@@ -547,7 +568,21 @@ async def create_allocation(
         raise HTTPException(status_code=400, detail="Сумма поступления должна быть > 0")
     # Единый путь проведения (ручной ввод и банк-импорт): apply_allocation считает статус
     # и эмитит finance.payment.received (+ .paid при полном закрытии).
+    from core.domain.models import AuditLog
+    from core.services import nbrb
+
+    currency = payload.currency.strip().upper()
+    if currency != "BYN" and payload.operation_date is None:
+        raise HTTPException(status_code=422, detail="Укажите дату валютного поступления")
+    try:
+        amt, quote = await nbrb.convert(session, amt, currency, payload.operation_date or nbrb.today())
+    except nbrb.RateUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     alloc = await apply_allocation(session, core.event_bus, payment, amt)
+    session.add(AuditLog(actor="finance", action="finance.fx.applied",
+                         entity_ref=f"allocation:{alloc.id}",
+                         detail={"amount_original": payload.amount, "amount_byn": str(amt),
+                                 "quote": quote}))
     await session.commit()
     await session.refresh(alloc)
     return alloc
@@ -604,7 +639,13 @@ async def match_bank_transaction(
     payment = await session.get(Payment, payload.payment_id)
     if payment is None:
         raise HTTPException(status_code=404, detail="Счёт не найден")
-    amt = Decimal(str(tx.amount))
+    from core.services.nbrb import RateUnavailable
+    from modules.finance.official_fx import bank_amount
+
+    try:
+        amt = await bank_amount(session, tx)
+    except RateUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if amt <= 0:
         raise HTTPException(status_code=400, detail="У зачисления нет суммы")
     alloc = await apply_allocation(session, core.event_bus, payment, amt)
