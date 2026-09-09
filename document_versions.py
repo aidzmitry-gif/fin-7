@@ -49,13 +49,15 @@ async def on_original_superseded(payload, ctx):
         return
     await _serialize(ctx.session)
     ref = f"document:{payload['document_id']}"
-    rows = (await ctx.session.execute(select(Payment).where(Payment.entity_ref == ref).with_for_update())).scalars().all()
+    # A row lock alone does not refresh an invoice already held in the identity map.
+    rows = (await ctx.session.execute(select(Payment).where(Payment.entity_ref == ref)
+        .with_for_update().execution_options(populate_existing=True))).scalars().all()
     if not rows:
         # Explicit legacy reference only, with original persisted amount/deal check.
         rows = (await ctx.session.execute(select(Payment).where(
             Payment.ref == payload['number'], Payment.deal_id == payload['deal_id'],
             Payment.kind == 'receivable',
-        ).with_for_update())).scalars().all()
+        ).with_for_update().execution_options(populate_existing=True))).scalars().all()
     if not rows:
         if payload.get('content_sha256'):
             raise ValueError('Original invoice projection is not available yet; retry replacement')

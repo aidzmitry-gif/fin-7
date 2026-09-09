@@ -37,9 +37,12 @@ async def apply_allocation(
     Семантика (0061 / FIN-C3):
       - на **каждое** поступление (вкл. частичное) → ``finance.payment.received`` (office его ждёт);
       - Σ ≥ amount → статус ``paid`` + ``finance.payment.paid`` (полное закрытие);
-      - 0 < Σ < amount → ``partial``.
+      - 0 < Σ < amount → ``partial``, кроме уже ``paid`` / ``superseded``.
     Деньги — **строкой** в событии (float дрейфует копейки собственника, FIN-A2).
     """
+    # The caller may have loaded this invoice before replacement or settlement.
+    # Refresh under the same row lock used to retire an invoice's demand.
+    await session.refresh(payment, with_for_update=True)
     alloc = PaymentAllocation(payment_id=payment.id, amount=amount)
     session.add(alloc)
     await session.flush()
@@ -67,7 +70,7 @@ async def apply_allocation(
                 "finance.payment.paid",
                 {"ref": payment.ref, "deal_id": payment.deal_id, "entity_ref": f"payment:{payment.id}"},
             )
-    elif total > 0:
+    elif total > 0 and payment.status not in {"paid", "superseded"}:
         payment.status = "partial"
     return alloc
 
