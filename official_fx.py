@@ -1,7 +1,7 @@
 """Financial operations use dated official rates without a planning buffer."""
 import re
 from datetime import UTC, date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from core.domain.models import AuditLog
@@ -16,6 +16,24 @@ def bank_currency(value) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[A-Z]{3}", value) is None:
         raise BankCurrencyInvalid("Банковская операция требует явную валюту: три заглавные латинские буквы")
     return value
+
+
+class BankAmountInvalid(RateUnavailable):
+    """Invalid bank amounts cannot be stored as zero or silently rounded."""
+
+
+def bank_source_amount(value) -> Decimal:
+    if isinstance(value, (float, bool)) or not isinstance(value, (str, int, Decimal)):
+        raise BankAmountInvalid("Сумма банка должна быть точным положительным числом")
+    try:
+        amount = Decimal(value)
+        if (not amount.is_finite() or amount <= 0
+                or amount > Decimal("999999999999.99")
+                or amount != amount.quantize(Decimal("0.01"))):
+            raise BankAmountInvalid("Недопустимая сумма банка: значение, диапазон или точность")
+    except (InvalidOperation, ValueError) as exc:
+        raise BankAmountInvalid("Некорректная сумма банковской операции") from exc
+    return amount
 
 
 async def event_amount(amount, currency, payload, ctx) -> Decimal:
@@ -42,11 +60,12 @@ async def event_amount(amount, currency, payload, ctx) -> Decimal:
 
 async def bank_amount(session, tx) -> Decimal:
     currency = bank_currency(tx.currency)
+    amount = bank_source_amount(tx.amount)
     if currency == "BYN":
-        return Decimal(str(tx.amount))
+        return amount
     if tx.occurred_on is None:
         raise RateUnavailable("Валютное зачисление требует дату банка")
-    value, rate = await convert(session, tx.amount, currency, tx.occurred_on)
+    value, rate = await convert(session, amount, currency, tx.occurred_on)
     session.add(AuditLog(actor="finance", action="finance.fx.applied",
                          entity_ref=f"bank:{tx.ext_id}"[:64],
                          detail={"amount_original": str(tx.amount), "amount_byn": str(value),

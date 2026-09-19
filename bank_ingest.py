@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.domain.models import Counterparty
 from modules.finance.allocation import apply_allocation, sum_allocations
 from modules.finance.models import BankTransaction, Payment
-from modules.finance.official_fx import bank_currency
+from modules.finance.official_fx import bank_currency, bank_source_amount
 
 # Открытый счёт к получению = ждёт денег от клиента.
 _OPEN_STATUSES = ("pending", "partial")
@@ -158,23 +158,17 @@ async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -
             raise BankSourceIdentityConflict("Операция уже загружена из полной выписки; требуется сверка источников")
         known.add(ext_id)
         new += 1
-        amount = _to_decimal(tx.get("amount"))
+        amount = bank_source_amount(tx.get("amount"))
         row = BankTransaction(
             ext_id=ext_id,
             occurred_on=_parse_date(tx.get("date")),
-            amount=amount if amount is not None else Decimal("0"),
+            amount=amount,
             currency=bank_currency(tx.get("currency")),
             payer_unp=(tx.get("payer_unp") or None),
             payer_name=(tx.get("payer_name") or None),
             purpose=(tx.get("purpose") or None),
             account_code=(tx.get("account_code") or None),
         )
-        if amount is None or amount <= 0:
-            row.match_status = "unmatched"
-            row.note = "нет суммы зачисления"
-            session.add(row)
-            unmatched += 1
-            continue
         from modules.finance.official_fx import bank_amount
 
         amount = await bank_amount(session, row)
