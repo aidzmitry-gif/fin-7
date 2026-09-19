@@ -1,6 +1,8 @@
 """HTTP-API модуля Finance. Монтируется под префиксом ``/finance``."""
 from __future__ import annotations
 
+import csv
+import io
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -209,7 +211,7 @@ async def get_balance_sheet(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
-    """Бухгалтерский баланс на дату (Р7). Все суммы — строки BYN.
+    """Предварительный управленческий обзор, не регламентированный баланс.
 
     ``as_of`` — ISO-дата; некорректный формат → 400; без параметра — сегодня.
     ``?format=csv`` — CSV-выгрузка для скачивания.
@@ -229,7 +231,10 @@ async def get_balance_sheet(
     data = await _balance(session, as_of_date, core.services)
 
     if format == "csv":
-        lines = [f"Показатель,Сумма BYN,На дату {data['as_of']}"]
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(["Предварительный управленческий обзор", "Не регламентированный баланс", data["as_of"]])
+        writer.writerow(["Показатель", "Сумма BYN", "Статус"])
         for label, key in [
             ("Дебиторская задолженность", "accounts_receivable"),
             ("Денежные средства (банк)", "cash"),
@@ -239,10 +244,14 @@ async def get_balance_sheet(
             ("Задолженность по ФОТ", "payroll_payable"),
             ("Задолженность по налогам", "tax_payable"),
             ("ИТОГО Пассивы", "total_liabilities"),
-            ("Капитал (Equity)", "equity"),
+            ("Капитал по бухгалтерским остаткам", "equity"),
         ]:
-            lines.append(f"{label},{data[key] or ''}")
-        csv_body = "\n".join(lines) + "\n"
+            value = data[key]
+            writer.writerow([label, value if value is not None else "",
+                             "Нет подтверждённых данных" if value is None else "Предварительно"])
+        for limitation in data.get("limitations", []):
+            writer.writerow(["Ограничение", "", limitation])
+        csv_body = output.getvalue()
         fn = f"balance_sheet_{data['as_of']}.csv"
         return Response(
             content=csv_body,

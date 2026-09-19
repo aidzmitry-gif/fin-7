@@ -1,21 +1,6 @@
-"""Бухгалтерский баланс (Balance Sheet) — снимок активов / пассивов на дату (Р7).
-
-В отличие от P&L/ДДС — не за период, а на конкретную дату (as_of).
-
-Активы:
-  accounts_receivable = SUM Payment WHERE kind='receivable' AND status IN ('recognized','pending')
-  cash                = OneCGateway.fetch_bank_balance() → None при mock
-  inventory_value     = OneCGateway.fetch_balance_sheet(on_date)['inventory'] → None при mock
-
-Пассивы:
-  accounts_payable  = SUM Payment WHERE kind IN ('po_planned','freight','landed') AND status='pending'
-  payroll_payable   = SUM Payment WHERE kind='payroll' AND status='pending'
-  tax_payable       = SUM Payment WHERE kind='tax' AND status='pending'
-
-Капитал:
-  equity = total_assets − total_liabilities
-
-Все суммы — строки BYN (Decimal, без float-дрейфа). cash / inventory_value — str | None.
+"""Предварительный управленческий обзор; не регламентированный баланс.
+Капитал без бухгалтерских остатков не вычисляется из разницы итогов.
+Недоступные компоненты активов сохраняются неизвестными, а не нулевыми.
 """
 from __future__ import annotations
 
@@ -38,6 +23,8 @@ _PENDING = "pending"
 
 
 def _fmt(d: Decimal) -> str:
+    if not d.is_finite():
+        raise ValueError("Financial report amount must be finite")
     return f"{d:.2f}"
 
 
@@ -46,7 +33,7 @@ async def get_balance_sheet(
     as_of_date: date,
     services: Any = None,
 ) -> dict:
-    """Баланс на дату as_of_date. Все числовые поля — строки BYN.
+    """Управленческий обзор на дату; неподтверждённые значения остаются None.
 
     cash / inventory_value — str | None (None при mock / недоступном шлюзе).
     """
@@ -108,14 +95,22 @@ async def get_balance_sheet(
         except Exception:  # noqa: BLE001 — fail-soft
             pass
 
-    # ──── Итоги ────
-    cash_dec = Decimal(cash) if cash is not None else Decimal("0")
-    inv_dec = Decimal(inventory_value) if inventory_value is not None else Decimal("0")
-
-    total_assets = accounts_receivable + cash_dec + inv_dec
+    # No synthetic equity or complete asset total from unknown components.
+    total_assets = None
+    if cash is not None and inventory_value is not None:
+        total_assets = accounts_receivable + Decimal(cash) + Decimal(inventory_value)
     total_liabilities = accounts_payable + payroll_payable + tax_payable
-    equity = total_assets - total_liabilities
-
+    limitations = [
+        "Капитал не подтверждён бухгалтерскими остатками.",
+        "Расчёты используют текущие статусы и не подтверждают исторический баланс.",
+        "Отчёт не разделяет данные по юридическим лицам.",
+    ]
+    if cash is None:
+        limitations.append("Банковский остаток не получен.")
+    else:
+        limitations.append("Банковский остаток не подтверждён на выбранную дату.")
+    if inventory_value is None:
+        limitations.append("Стоимость запасов не получена.")
     return {
         "as_of": as_of_date.isoformat(),
         "currency": "BYN",
@@ -123,12 +118,16 @@ async def get_balance_sheet(
         "accounts_receivable": _fmt(accounts_receivable),
         "cash": cash,
         "inventory_value": inventory_value,
-        "total_assets": _fmt(total_assets),
+        "total_assets": _fmt(total_assets) if total_assets is not None else None,
         # Пассивы
         "accounts_payable": _fmt(accounts_payable),
         "payroll_payable": _fmt(payroll_payable),
         "tax_payable": _fmt(tax_payable),
         "total_liabilities": _fmt(total_liabilities),
         # Капитал
-        "equity": _fmt(equity),
+        "equity": None,
+        "report_kind": "management_snapshot",
+        "preliminary": True,
+        "statutory_certified": False,
+        "limitations": limitations,
     }
