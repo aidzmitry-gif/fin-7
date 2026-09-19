@@ -1,10 +1,21 @@
 """Financial operations use dated official rates without a planning buffer."""
+import re
 from datetime import UTC, date
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from core.domain.models import AuditLog
 from core.services.nbrb import RateUnavailable, convert
+
+
+class BankCurrencyInvalid(RateUnavailable):
+    """Bank source currency must be explicit and preserved exactly."""
+
+
+def bank_currency(value) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[A-Z]{3}", value) is None:
+        raise BankCurrencyInvalid("Банковская операция требует явную валюту: три заглавные латинские буквы")
+    return value
 
 
 async def event_amount(amount, currency, payload, ctx) -> Decimal:
@@ -30,7 +41,7 @@ async def event_amount(amount, currency, payload, ctx) -> Decimal:
 
 
 async def bank_amount(session, tx) -> Decimal:
-    currency = (tx.currency or "BYN").strip().upper()
+    currency = bank_currency(tx.currency)
     if currency == "BYN":
         return Decimal(str(tx.amount))
     if tx.occurred_on is None:

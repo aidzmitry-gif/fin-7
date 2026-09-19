@@ -603,11 +603,15 @@ async def bank_sync(
     модуля ``finance`` (аноним/чужая роль → 403 middleware). Возврат — сводка sync.
     """
     from modules.finance.bank_ingest import BankSourceIdentityConflict, sync_incoming
+    from modules.finance.official_fx import BankCurrencyInvalid
 
     gateway = getattr(core.services, "bank", None)
     try:
         summary = await sync_incoming(session, gateway, core.event_bus)
         await session.commit()
+    except BankCurrencyInvalid as exc:
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except BankSourceIdentityConflict as exc:
         await session.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc

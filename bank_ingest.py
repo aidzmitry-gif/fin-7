@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.domain.models import Counterparty
 from modules.finance.allocation import apply_allocation, sum_allocations
 from modules.finance.models import BankTransaction, Payment
+from modules.finance.official_fx import bank_currency
 
 # Открытый счёт к получению = ждёт денег от клиента.
 _OPEN_STATUSES = ("pending", "partial")
@@ -162,7 +163,7 @@ async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -
             ext_id=ext_id,
             occurred_on=_parse_date(tx.get("date")),
             amount=amount if amount is not None else Decimal("0"),
-            currency=(tx.get("currency") or "BYN")[:3],
+            currency=bank_currency(tx.get("currency")),
             payer_unp=(tx.get("payer_unp") or None),
             payer_name=(tx.get("payer_name") or None),
             purpose=(tx.get("purpose") or None),
