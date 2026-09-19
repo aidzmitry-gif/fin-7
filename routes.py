@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.runtime.core import Core
@@ -601,14 +602,21 @@ async def bank_sync(
     Источник — ``core.services.bank`` (нет кредов → пусто, честная деградация). Под гейтом
     модуля ``finance`` (аноним/чужая роль → 403 middleware). Возврат — сводка sync.
     """
-    from modules.finance.bank_ingest import sync_incoming
+    from modules.finance.bank_ingest import BankSourceIdentityConflict, sync_incoming
 
     gateway = getattr(core.services, "bank", None)
     try:
         summary = await sync_incoming(session, gateway, core.event_bus)
+        await session.commit()
+    except BankSourceIdentityConflict as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Конфликт банковских операций. Сверьте уже загруженные источники перед повторным импортом.") from exc
     except Exception as exc:  # noqa: BLE001 — ошибку банка отдаём вызывающему как 502, не 500
+        await session.rollback()
         raise HTTPException(status_code=502, detail=f"Банк недоступен: {exc}") from exc
-    await session.commit()
     return {"ok": True, **summary}
 
 

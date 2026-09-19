@@ -126,6 +126,10 @@ async def _match_candidate(
     return payment, "matched"
 
 
+class BankSourceIdentityConflict(ValueError):
+    """Legacy incoming and full-statement identities require explicit reconciliation."""
+
+
 async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -> dict:
     """Опросить банк, провести идемпотентно, сматчить. Возврат — сводка по итогам.
 
@@ -141,11 +145,16 @@ async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -
     known = set(
         (await session.execute(select(BankTransaction.ext_id))).scalars().all()
     )
+    statement_ids = set((await session.scalars(select(BankTransaction.source_external_id).where(
+        BankTransaction.source_provider.is_not(None),
+    ))).all())
     new = matched = unmatched = 0
     for tx in incoming:
         ext_id = str(tx.get("ext_id") or "").strip()
         if not ext_id or ext_id in known:
             continue  # без ext_id провести идемпотентно нельзя — пропускаем (не задваиваем)
+        if ext_id in statement_ids:
+            raise BankSourceIdentityConflict("Операция уже загружена из полной выписки; требуется сверка источников")
         known.add(ext_id)
         new += 1
         amount = _to_decimal(tx.get("amount"))
