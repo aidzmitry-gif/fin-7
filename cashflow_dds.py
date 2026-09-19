@@ -54,9 +54,9 @@ async def cashflow_report(
         Payment.status.in_(_INFLOW_STATUS),
     )
     if from_date is not None:
-        q_in = q_in.where(Payment.created_at >= from_date)
+        q_in = q_in.where(func.date(Payment.created_at) >= from_date.isoformat())
     if to_date is not None:
-        q_in = q_in.where(Payment.created_at <= to_date)
+        q_in = q_in.where(func.date(Payment.created_at) <= to_date.isoformat())
 
     inflows = Decimal(str((await session.execute(q_in)).scalar_one()))
 
@@ -70,9 +70,9 @@ async def cashflow_report(
         .group_by(Payment.kind)
     )
     if from_date is not None:
-        q_out = q_out.where(Payment.created_at >= from_date)
+        q_out = q_out.where(func.date(Payment.created_at) >= from_date.isoformat())
     if to_date is not None:
-        q_out = q_out.where(Payment.created_at <= to_date)
+        q_out = q_out.where(func.date(Payment.created_at) <= to_date.isoformat())
 
     out_by_kind: dict[str, Decimal] = {k: Decimal("0") for k in _OUTFLOW_KINDS}
     for kind, total in (await session.execute(q_out)).all():

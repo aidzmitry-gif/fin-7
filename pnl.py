@@ -68,9 +68,9 @@ async def pnl_report(
         Payment.kind
     )
     if from_date is not None:
-        q_base = q_base.where(Payment.created_at >= from_date)
+        q_base = q_base.where(func.date(Payment.created_at) >= from_date.isoformat())
     if to_date is not None:
-        q_base = q_base.where(Payment.created_at <= to_date)
+        q_base = q_base.where(func.date(Payment.created_at) <= to_date.isoformat())
 
     by_kind: dict[str, Decimal] = {k: Decimal("0") for k in _ALL_PNL_KINDS}
     for kind, total in (await session.execute(q_base)).all():
