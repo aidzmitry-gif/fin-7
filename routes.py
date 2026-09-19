@@ -617,7 +617,11 @@ async def list_bank_transactions(
     status: str | None = None, session: AsyncSession = Depends(get_session)
 ):
     """Ledger зачислений; ``?status=unmatched`` — очередь «разобрать вручную»."""
-    q = select(BankTransaction).order_by(BankTransaction.id.desc())
+    # Full statements are reviewed in the organization-scoped accounting queue.
+    q = select(BankTransaction).where(
+        BankTransaction.source_provider.is_(None),
+        BankTransaction.direction == "receipt",
+    ).order_by(BankTransaction.id.desc())
     if status:
         q = q.where(BankTransaction.match_status == status)
     return (await session.execute(q)).scalars().all()
@@ -634,6 +638,8 @@ async def match_bank_transaction(
     tx = await session.get(BankTransaction, tx_id)
     if tx is None:
         raise HTTPException(status_code=404, detail="Зачисление не найдено")
+    if tx.source_provider is not None or tx.direction != "receipt":
+        raise HTTPException(status_code=409, detail="Операция полной выписки обрабатывается в бухгалтерии")
     if tx.match_status in {"matched", "manual"}:
         raise HTTPException(status_code=409, detail="Зачисление уже сматчено")
     payment = await session.get(Payment, payload.payment_id)

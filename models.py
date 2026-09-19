@@ -115,6 +115,13 @@ class BankTransaction(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     ext_id: Mapped[str] = mapped_column(String(128), unique=True)  # идемпотентность опроса
+    # Full-statement rows use a scoped ext_id and keep the original bank identity.
+    # Existing incoming-only rows retain receipt + NULL provenance.
+    direction: Mapped[str] = mapped_column(String(16), default="receipt", server_default="receipt")
+    source_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_external_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_kind: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    source_reference: Mapped[str | None] = mapped_column(String(500), nullable=True)
     occurred_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
     currency: Mapped[str] = mapped_column(String(3), default="BYN", server_default="BYN")
