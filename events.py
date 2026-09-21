@@ -36,7 +36,7 @@ def _to_decimal(raw) -> Decimal:
 
 
 async def on_document_posted(payload: dict, ctx) -> None:
-    """Счёт записан в 1С → создаём платёж к оплате (sales → finance).
+    """Счёт выпущен в ERP → создаём платёж к оплате (sales → finance).
 
     Лайфсайкл (0061): ``due_date`` из payload (по умолчанию None — honest-empty),
     ``deal_id``/``counterparty_ref`` — провенанс связи для маржи by-deal/by-counterparty.
