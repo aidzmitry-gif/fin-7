@@ -63,7 +63,7 @@ async def apply_allocation(
             "outstanding": str(outstanding_after if outstanding_after > 0 else Decimal("0")),
         },
     )
-    if total >= target:
+    if total >= target and payment.status not in {"cancelled", "superseded"}:
         if payment.status != "paid":
             payment.status = "paid"
             payment.paid_at = datetime.now(UTC)
@@ -72,7 +72,7 @@ async def apply_allocation(
                 "finance.payment.paid",
                 {**owner, "ref": payment.ref, "deal_id": payment.deal_id, "entity_ref": f"payment:{payment.id}"},
             )
-    elif total > 0 and payment.status not in {"paid", "superseded"}:
+    elif total > 0 and payment.status not in {"paid", "cancelled", "superseded"}:
         payment.status = "partial"
     return alloc
 

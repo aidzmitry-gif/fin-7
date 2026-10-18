@@ -65,6 +65,7 @@ class PaymentOut(BaseModel):
     # Вычисляемые поля (заполняются в роутере):
     outstanding: OptMoneyStr = None  # остаток к поступлению (amount − sum allocations)
     is_overdue: bool | None = None  # status in (pending, partial) and due_date < today
+    source_controlled: bool = False
 
 
 class StatusUpdate(BaseModel):

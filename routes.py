@@ -78,6 +78,34 @@ def _organization_report(report: dict, organization_id: int) -> dict:
     }
 
 
+@router.get("/organizations")
+async def finance_organizations(
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    gateway = getattr(core.services, "accounting", None)
+    if gateway is None:
+        raise HTTPException(503, "Сервис доступа к организациям недоступен")
+    candidates = await gateway.source_organizations(session, user)
+    if not isinstance(candidates, list) or any(
+        not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] <= 0
+        or not isinstance(row.get("name"), str) or not isinstance(row.get("unp"), str)
+        for row in candidates
+    ) or len({row["id"] for row in candidates}) != len(candidates):
+        raise HTTPException(503, "Не удалось проверить список организаций")
+    result = []
+    for row in sorted(candidates, key=lambda item: item["id"]):
+        try:
+            await gateway.finance_member(session, row["id"], user, write=False)
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                continue
+            raise
+        result.append({key: row[key] for key in ("id", "name", "unp")})
+    return result
+
+
 # ───────────────────────── Сводка / Aging / Cash-flow / Маржа / Сверка ─────────────────────────
 
 
@@ -179,30 +207,18 @@ async def margin_reconcile_deal(
     items: str | None = None,
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
 ):
-    """Сходимость landed по сделке: finance (проводки) ↔ facade (landed-cost ядра).
-
-    Параметры:
-        - ``deal_id`` — сделка для сверки.
-        - ``items`` — опц. ``SKU1:qty1,SKU2:qty2`` — список SKU+qty позиций сделки для
-          расчёта контрольной величины через ``core.services.landed_cost``. Без ``items``
-          или с отсутствующим фасадом → ``source_facade_available=false`` (honest-empty).
-    """
-    from modules.finance.margin import _parse_items, reconcile_deal_margin
-
-    facade = getattr(core.services, "landed_cost", None)
-    return await reconcile_deal_margin(session, facade, deal_id, _parse_items(items))
+    raise HTTPException(503, 'Сверка себестоимости по организации недоступна: принадлежность источника себестоимости ещё не подтверждена.')
 
 
 @router.get("/reconcile-1c")
 async def reconcile_1c(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
 ):
-    """Сверка платежей ERP с 1С (ЧТЕНИЕ, fail-soft). 1С недоступна → source_available=False."""
-    from modules.finance.reconcile import reconcile_with_onec
-
-    return await reconcile_with_onec(session, getattr(core.services, "onec", None))
+    raise HTTPException(503, 'Сверка с 1С по организации недоступна: принадлежность источника платежей ещё не подтверждена.')
 
 
 # ───────────────────────── ДДС (Р6) ─────────────────────────
@@ -524,6 +540,7 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
         "account_id": p.account_id,
         "outstanding": money_str(outstanding),
         "is_overdue": is_overdue,
+        "source_controlled": bool(p.entity_ref and p.entity_ref.startswith("document:")),
     }
 
 
@@ -635,6 +652,8 @@ async def update_payment(
     ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if obj is None:
         raise HTTPException(404, "Платёж не найден")
+    if obj.entity_ref and obj.entity_ref.startswith("document:"):
+        raise HTTPException(409, "Статус этого требования определяется исходным счётом и поступлениями")
     obj.status = payload.status
     if payload.status == "paid":
         obj.paid_at = datetime.now(UTC)
@@ -663,6 +682,8 @@ async def create_allocation(
     ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if payment is None:
         raise HTTPException(404, "Платёж не найден")
+    if payment.status in {"cancelled", "superseded"}:
+        raise HTTPException(409, "Счёт отменён или заменён. Новое поступление к нему вручную не добавляется")
     amt = Decimal(str(payload.amount))
     if amt <= 0:
         raise HTTPException(400, "Сумма поступления должна быть > 0")
@@ -693,32 +714,9 @@ async def create_allocation(
 async def bank_sync(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_write_organization),
 ):
-    """Опросить банк, идемпотентно провести зачисления, сматчить к счетам (Альфа, слайс 1).
-
-    Источник — ``core.services.bank`` (нет кредов → пусто, честная деградация). Под гейтом
-    модуля ``finance`` (аноним/чужая роль → 403 middleware). Возврат — сводка sync.
-    """
-    from modules.finance.bank_ingest import BankSourceIdentityConflict, sync_incoming
-    from modules.finance.official_fx import BankAmountInvalid, BankCurrencyInvalid
-
-    gateway = getattr(core.services, "bank", None)
-    try:
-        summary = await sync_incoming(session, gateway, core.event_bus)
-        await session.commit()
-    except (BankCurrencyInvalid, BankAmountInvalid) as exc:
-        await session.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except BankSourceIdentityConflict as exc:
-        await session.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(status_code=409, detail="Конфликт банковских операций. Сверьте уже загруженные источники перед повторным импортом.") from exc
-    except Exception as exc:  # noqa: BLE001 — ошибку банка отдаём вызывающему как 502, не 500
-        await session.rollback()
-        raise HTTPException(status_code=502, detail=f"Банк недоступен: {exc}") from exc
-    return {"ok": True, **summary}
+    raise HTTPException(503, 'Синхронизация банка по организации недоступна: принадлежность канала выписки ещё не подтверждена.')
 
 
 @router.get("/bank/transactions", response_model=list[BankTxOut])
