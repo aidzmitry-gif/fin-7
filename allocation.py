@@ -14,7 +14,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from modules.finance.models import Payment, PaymentAllocation
+from modules.finance.models import Payment, PaymentAllocation, is_landed_projection
 
 
 async def sum_allocations(session: AsyncSession, payment_id: int) -> Decimal:
@@ -43,6 +43,8 @@ async def apply_allocation(
     # The caller may have loaded this invoice before replacement or settlement.
     # Refresh under the same row lock used to retire an invoice's demand.
     await session.refresh(payment, with_for_update=True)
+    if is_landed_projection(payment):
+        raise ValueError("A landed calculation is cost, not a payment receivable")
     owner = {"organization_id": payment.organization_id} if payment.organization_id is not None else {}
     alloc = PaymentAllocation(payment_id=payment.id, amount=amount)
     session.add(alloc)

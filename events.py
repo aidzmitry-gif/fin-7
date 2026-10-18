@@ -5,11 +5,15 @@ Finance не знает о sales/procurement/logistics напрямую — ре
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from sqlalchemy import select
+
 from modules.finance.fx import BASE as BASE_CCY
-from modules.finance.models import Payment
+from modules.finance.models import LANDED_PROJECTION_PREFIX, Payment
 from modules.finance.official_fx import event_amount
 
 
@@ -136,41 +140,61 @@ async def on_freight_refund(payload: dict, ctx) -> None:
 
 
 async def on_landed_cost(payload: dict, ctx) -> None:
-    """Закупка зафиксировала себестоимость прихода → проводка-затрата (procurement → finance).
-
-    Подписка на ``procurement.landed_cost.calculated``. Себестоимость прихода = расход
-    (``kind="landed"``) для подсчёта фактической маржи: выручка − landed − фрахт.
-    Сумму берём готовой (``amount`` либо ``total_landed_byn``) либо считаем ``unit×qty``.
-    Нуль игнорим (honest-empty).
-
-    ⚠ Закупки P4 могут менять ``stage`` 'estimated'→'actual' — ЭТОТ обработчик ``stage``
-    НЕ читает (только qty/total/unit), так что P4 безопасно приземляется.
-    """
-    if ctx is None:
-        return
-    amount = _to_decimal(payload.get("amount"))
-    currency = (payload.get("currency") or BASE_CCY).strip().upper()
-    if amount <= 0:
-        amount = _to_decimal(payload.get("total_landed_byn"))
-        currency = BASE_CCY
-    if amount <= 0:
-        amount = _to_decimal(payload.get("unit_landed_cost_byn")) * _to_decimal(payload.get("qty"))
-    if amount <= 0:
-        return
-    ref = payload.get("entity_ref") or payload.get("sku_code") or ""
-    amount_byn = await event_amount(amount, currency, payload, ctx)
-    ctx.session.add(
-        Payment(
-            ref=f"landed:{ref}",
-            amount=amount_byn,
-            amount_orig=amount if currency != BASE_CCY else None,
-            currency=currency,
-            status="pending",
-            kind="landed",
-            deal_id=payload.get("deal_id"),
-            counterparty_ref=payload.get("counterparty_ref"),
-        )
+    """Project the exact received-PO calculation. Cost never attests payment."""
+    org, order_id = payload.get("organization_id"), payload.get("purchase_order_id")
+    if (ctx is None or payload.get("stage") != "actual"
+            or any(type(x) is not int or x <= 0 for x in (org, order_id, getattr(ctx, "event_id", None)))):
+        raise ValueError("Landed cost requires its exact owned calculation receipt and delivery context")
+    if getattr(ctx.services, "procurement_source", None) is None:
+        raise ValueError("Verified purchase calculation source is unavailable")
+    await ctx.services.accounting.lock_event_organization(ctx.session, org)
+    source = await ctx.services.procurement_source.landed_financial_source(
+        ctx.session, org, order_id, ctx.event_id,
     )
+    if (source["organization_id"] != org or source["purchase_order_id"] != order_id
+            or source["event_id"] != ctx.event_id or source["payload"] != payload
+            or source["currency"] != "BYN"):
+        raise ValueError("Landed event does not match its verified source")
+    # Reuse the same transaction serialization as immutable invoice projections.
+    from modules.finance.document_versions import _serialize
+
+    await _serialize(ctx.session)
+    sku_hash = hashlib.sha256(source["sku_code"].encode()).hexdigest()
+    identity = f"{LANDED_PROJECTION_PREFIX}{source['receipt_id']}:{order_id}:{sku_hash}"
+    binding = "landed-v1:" + hashlib.sha256(json.dumps(
+        source, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+    amount = Decimal(source["amount"])
+    if (not amount.is_finite() or amount < 0 or amount >= Decimal("1000000000000")
+            or amount != amount.quantize(Decimal("0.01"))):
+        raise ValueError("Exact finite BYN landed total is required")
+    ref = f"landed:purchase_order:{order_id}:{source['sku_code']}"
+    rows = (await ctx.session.scalars(select(Payment).where(
+        (Payment.entity_ref == identity) | (Payment.ref == ref) |
+        ((Payment.kind == "landed") & (Payment.ref == f"landed:purchase_order:{order_id}")),
+    ).with_for_update().execution_options(populate_existing=True))).all()
+    if rows:
+        if len(rows) != 1:
+            raise ValueError("Landed cost has ambiguous legacy projections; review required")
+        row = rows[0]
+        if (row.organization_id != org or row.entity_ref != identity or row.description != binding
+                or row.ref != ref
+                or row.amount != amount or row.currency != "BYN" or row.amount_orig is not None
+                or row.kind != "landed" or row.status != "recorded" or row.paid_at is not None
+                or row.account_id is not None or row.deal_id is not None or row.counterparty_ref is not None
+                or row.due_date is not None):
+            raise ValueError("Landed cost conflicts with its immutable source; review required")
+        from modules.finance.allocation import sum_allocations
+
+        if await sum_allocations(ctx.session, row.id):
+            raise ValueError("Cost projection cannot contain payment allocations")
+        return
+    ctx.session.add(Payment(
+        organization_id=org, ref=ref,
+        amount=amount, amount_orig=None, currency="BYN", status="recorded", kind="landed",
+        entity_ref=identity, description=binding,
+    ))
+    await ctx.session.flush()
 
 
 async def on_claim_resolved(payload: dict, ctx) -> None:

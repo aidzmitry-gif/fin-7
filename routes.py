@@ -20,6 +20,7 @@ from modules.finance.models import (
     BankTransaction,
     Payment,
     PaymentAllocation,
+    is_landed_projection,
 )
 from modules.finance.schemas import (
     AllocationCreate,
@@ -538,9 +539,9 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
         "deal_id": p.deal_id,
         "counterparty_ref": p.counterparty_ref,
         "account_id": p.account_id,
-        "outstanding": money_str(outstanding),
+        "outstanding": None if is_landed_projection(p) else money_str(outstanding),
         "is_overdue": is_overdue,
-        "source_controlled": bool(p.entity_ref and p.entity_ref.startswith("document:")),
+        "source_controlled": is_landed_projection(p) or bool(p.entity_ref and p.entity_ref.startswith("document:")),
     }
 
 
@@ -652,6 +653,8 @@ async def update_payment(
     ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if obj is None:
         raise HTTPException(404, "Платёж не найден")
+    if is_landed_projection(obj):
+        raise HTTPException(409, "Расчёт себестоимости не является оплатой. Его состояние определяется исходной закупкой")
     if obj.entity_ref and obj.entity_ref.startswith("document:"):
         raise HTTPException(409, "Статус этого требования определяется исходным счётом и поступлениями")
     obj.status = payload.status
@@ -682,6 +685,8 @@ async def create_allocation(
     ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if payment is None:
         raise HTTPException(404, "Платёж не найден")
+    if is_landed_projection(payment):
+        raise HTTPException(409, "К расчёту себестоимости нельзя добавить поступление денег")
     if payment.status in {"cancelled", "superseded"}:
         raise HTTPException(409, "Счёт отменён или заменён. Новое поступление к нему вручную не добавляется")
     amt = Decimal(str(payload.amount))

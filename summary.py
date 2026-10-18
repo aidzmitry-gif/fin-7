@@ -23,7 +23,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from modules.finance.models import Payment
+from modules.finance.models import LANDED_PROJECTION_PREFIX, Payment
 from modules.finance.schemas import money_str
 
 _KINDS = ("receivable", "freight", "freight_refund", "landed", "claim_refund", "po_planned")
@@ -78,10 +78,16 @@ async def finance_summary(session: AsyncSession, *, organization_id: int) -> dic
     # маржа в % — только когда есть выручка (иначе делёж на ноль → честный None)
     pct = float(gross / revenue * 100) if revenue > 0 else None
 
-    # касса (ДДС-lite): поступления (оплаченные счета + возвраты фрахта) − расходы (фрахт+landed)
+    # Legacy cash semantics are retained; the new verified PO cost is not cash.
     refund_inflow = -refund  # хранится отрицательной → приток = модуль
     inflow = paid_recv + refund_inflow
-    outflow = freight + landed
+    cost_only = Decimal(str((await session.execute(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.organization_id == organization_id, Payment.kind == "landed",
+            Payment.entity_ref.startswith(LANDED_PROJECTION_PREFIX),
+        )
+    )).scalar_one()))
+    outflow = freight + landed - cost_only
     net_cash = inflow - outflow
 
     # money — строкой BYN (см. money_str); pct — процент, НЕ деньги, остаётся float

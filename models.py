@@ -20,6 +20,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
 
+LANDED_PROJECTION_PREFIX = "landed-receipt:"
+
+
+def is_landed_projection(payment) -> bool:
+    return payment.kind == "landed" and bool(
+        payment.entity_ref and payment.entity_ref.startswith(LANDED_PROJECTION_PREFIX)
+    )
+
 
 class Payment(Base):
     """Платёж: назначение (сделка/документ), сумма, статус.
