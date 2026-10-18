@@ -20,6 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from modules.finance.aging import _payments_outstanding
 from modules.finance.schemas import money_str
 
+
+class FinanceAccountUnavailable(ValueError):
+    """The selected account is unavailable in the requested organization."""
+
+
 Mode = Literal["week", "day"]
 
 
@@ -28,7 +33,7 @@ def _monday(d: date) -> date:
 
 
 async def _opening_balance(
-    session: AsyncSession, account_id: int | None = None
+    session: AsyncSession, account_id: int | None = None, *, organization_id: int
 ) -> Decimal:
     """Текущее сальдо: фактически оплаченные счета − фактически оплаченные расходы.
 
@@ -38,7 +43,22 @@ async def _opening_balance(
     """
     from modules.finance.models import BankAccount, Payment
 
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("organization_id must be a positive integer")
+    if account_id is not None and (type(account_id) is not int or account_id <= 0):
+        raise ValueError("account_id must be a positive integer")
+    acc = None
+    if account_id is not None:
+        acc = (await session.execute(
+            select(BankAccount).where(
+                BankAccount.id == account_id, BankAccount.organization_id == organization_id
+            )
+        )).scalar_one_or_none()
+        if acc is None:
+            raise FinanceAccountUnavailable("Bank account is unavailable for this organization")
+
     def _scoped(q):
+        q = q.where(Payment.organization_id == organization_id)
         if account_id is not None:
             q = q.where(Payment.account_id == account_id)
         return q
@@ -63,17 +83,15 @@ async def _opening_balance(
     ).scalar_one()
     cashflow_opening = Decimal(str(received)) - Decimal(str(paid_out))
     # начальное сальдо BankAccount (если есть и совпадает аккаунт) — прибавляем
-    if account_id is not None:
-        acc = await session.get(BankAccount, account_id)
-        if acc is not None:
-            opening = Decimal(str(acc.opening_balance))
-            if opening and (acc.currency or "BYN").strip().upper() != "BYN":
-                from core.services.nbrb import RateUnavailable, convert
+    if acc is not None:
+        opening = Decimal(str(acc.opening_balance))
+        if opening and (acc.currency or "BYN").strip().upper() != "BYN":
+            from core.services.nbrb import RateUnavailable, convert
 
-                if acc.opening_at is None:
-                    raise RateUnavailable("Укажите дату начального валютного остатка")
-                opening, _ = await convert(session, opening, acc.currency, acc.opening_at)
-            cashflow_opening += opening
+            if acc.opening_at is None:
+                raise RateUnavailable("Укажите дату начального валютного остатка")
+            opening, _ = await convert(session, opening, acc.currency, acc.opening_at)
+        cashflow_opening += opening
     return cashflow_opening
 
 
@@ -84,6 +102,8 @@ async def cashflow_forecast(
     mode: Mode = "week",
     days: int = 30,
     account_id: int | None = None,
+    *,
+    organization_id: int,
 ) -> dict:
     """Понедельный (mode='week') или подневный (mode='day') прогноз.
 
@@ -91,6 +111,7 @@ async def cashflow_forecast(
     day:  ``days`` корзин по 1 дню; первая корзина — сегодня.
     ``account_id`` (опц.) — бакетируем только платежи этого счёта.
     """
+    opening = await _opening_balance(session, account_id, organization_id=organization_id)
     today = today or date.today()
     if mode == "day":
         bucket_count = max(1, min(days, 90))
@@ -115,7 +136,7 @@ async def cashflow_forecast(
     def _belongs(p) -> bool:
         return account_id is None or p.account_id == account_id
 
-    for p, outstanding in await _payments_outstanding(session, ("receivable",)):
+    for p, outstanding in await _payments_outstanding(session, ("receivable",), organization_id=organization_id):
         if not _belongs(p):
             continue
         if p.due_date is None:
@@ -127,7 +148,7 @@ async def cashflow_forecast(
 
     # отток включает PO_planned (FIN-B1) — это ещё план, но для прогноза кассы важен
     for p, outstanding in await _payments_outstanding(
-        session, ("freight", "landed", "po_planned")
+        session, ("freight", "landed", "po_planned"), organization_id=organization_id
     ):
         if not _belongs(p):
             continue
@@ -138,7 +159,6 @@ async def cashflow_forecast(
         if k in buckets_map:
             buckets_map[k]["outflow"] += outstanding
 
-    opening = await _opening_balance(session, account_id)
     rows = []
     cumulative = opening
     for w in bucket_starts:

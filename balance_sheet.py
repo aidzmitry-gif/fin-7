@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,17 +30,21 @@ def _fmt(d: Decimal) -> str:
 async def get_balance_sheet(
     session: AsyncSession,
     as_of_date: date,
-    services: Any = None,
+    *,
+    organization_id: int,
 ) -> dict:
     """Управленческий обзор на дату; неподтверждённые значения остаются None.
 
     cash / inventory_value — str | None (None при mock / недоступном шлюзе).
     """
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("A positive explicit organization_id is required")
     # func.date() приводит datetime → date для совместимости SQLite/Postgres
     as_of_iso = as_of_date.isoformat()
 
     # ──── Дебиторка: receivable pending/recognized ────
     q_ar = select(func.coalesce(func.sum(Payment.amount), 0)).where(
+        Payment.organization_id == organization_id,
         Payment.kind.in_(_AR_KIND),
         Payment.status.in_(_AR_STATUS),
         func.date(Payment.created_at) <= as_of_iso,
@@ -50,6 +53,7 @@ async def get_balance_sheet(
 
     # ──── Кредиторка: po_planned/freight/landed pending ────
     q_ap = select(func.coalesce(func.sum(Payment.amount), 0)).where(
+        Payment.organization_id == organization_id,
         Payment.kind.in_(_AP_KINDS),
         Payment.status == _PENDING,
         func.date(Payment.created_at) <= as_of_iso,
@@ -58,6 +62,7 @@ async def get_balance_sheet(
 
     # ──── Долг по зарплате ────
     q_pay = select(func.coalesce(func.sum(Payment.amount), 0)).where(
+        Payment.organization_id == organization_id,
         Payment.kind == _PAYROLL_KIND,
         Payment.status == _PENDING,
         func.date(Payment.created_at) <= as_of_iso,
@@ -66,59 +71,32 @@ async def get_balance_sheet(
 
     # ──── Долг по налогам ────
     q_tax = select(func.coalesce(func.sum(Payment.amount), 0)).where(
+        Payment.organization_id == organization_id,
         Payment.kind == _TAX_KIND,
         Payment.status == _PENDING,
         func.date(Payment.created_at) <= as_of_iso,
     )
     tax_payable = Decimal(str((await session.execute(q_tax)).scalar_one()))
 
-    # ──── Банковский остаток из 1С (honest-empty) ────
-    cash: str | None = None
-    onec = getattr(services, "onec", None) if services is not None else None
-    if onec is not None:
-        try:
-            raw = await onec.fetch_bank_balance()
-            if raw is not None:
-                # fetch_bank_balance может вернуть dict или str/число
-                val = raw.get("balance", raw) if isinstance(raw, dict) else raw
-                cash = _fmt(Decimal(str(val)))
-        except Exception:  # noqa: BLE001 — fail-soft
-            pass
-
-    # ──── Остаток товаров из 1С (honest-empty) ────
-    inventory_value: str | None = None
-    if onec is not None:
-        try:
-            bs = await onec.fetch_balance_sheet(as_of_date)
-            if bs is not None and bs.get("inventory") is not None:
-                inventory_value = _fmt(Decimal(str(bs["inventory"])))
-        except Exception:  # noqa: BLE001 — fail-soft
-            pass
-
-    # No synthetic equity or complete asset total from unknown components.
-    total_assets = None
-    if cash is not None and inventory_value is not None:
-        total_assets = accounts_receivable + Decimal(cash) + Decimal(inventory_value)
+    # External assets require a trusted organization-specific source.
     total_liabilities = accounts_payable + payroll_payable + tax_payable
     limitations = [
         "Капитал не подтверждён бухгалтерскими остатками.",
         "Расчёты используют текущие статусы и не подтверждают исторический баланс.",
-        "Отчёт не разделяет данные по юридическим лицам.",
+        "Полнота обязательств выбранной организации не подтверждена.",
+        "Частичные оплаты и их даты не реконструируют историческую задолженность.",
+        "Банковский остаток выбранной организации не подтверждён.",
+        "Стоимость запасов выбранной организации не подтверждена.",
     ]
-    if cash is None:
-        limitations.append("Банковский остаток не получен.")
-    else:
-        limitations.append("Банковский остаток не подтверждён на выбранную дату.")
-    if inventory_value is None:
-        limitations.append("Стоимость запасов не получена.")
     return {
+        "calculation_basis": "Полные суммы по текущим статусам и дате создания; частичные оплаты не вычтены.",
         "as_of": as_of_date.isoformat(),
         "currency": "BYN",
         # Активы
         "accounts_receivable": _fmt(accounts_receivable),
-        "cash": cash,
-        "inventory_value": inventory_value,
-        "total_assets": _fmt(total_assets) if total_assets is not None else None,
+        "cash": None,
+        "inventory_value": None,
+        "total_assets": None,
         # Пассивы
         "accounts_payable": _fmt(accounts_payable),
         "payroll_payable": _fmt(payroll_payable),

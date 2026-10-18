@@ -1,6 +1,6 @@
 """ДДС (Движение Денежных Средств) — cash-basis отчёт.
 
-P&L = accrual (по начислению). ДДС = CASH (только реальные движения денег).
+P&L = accrual (по начислению). Эта проекция ДДС использует статусы платежей и не подтверждает банковское движение.
 
 Поступления (inflows):
   Payment WHERE status IN ('paid', 'received') AND kind = 'receivable'
@@ -10,13 +10,12 @@ P&L = accrual (по начислению). ДДС = CASH (только реал�
                                               'freight', 'landed', 'po_planned')
 
 Нетто = inflows − outflows.
-Остаток (bank_balance) — из OneCGateway.fetch_bank_balance, None при mock-режиме.
+Остаток банка неизвестен без подтверждённого источника выбранной организации.
 """
 from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,16 +39,19 @@ async def cashflow_report(
     session: AsyncSession,
     from_date: date | None = None,
     to_date: date | None = None,
-    onec: Any = None,
+    *,
+    organization_id: int,
 ) -> dict:
     """ДДС-отчёт за период (все суммы — строки BYN).
 
     Параметры:
         from_date / to_date — фильтр по created_at (оба опциональны).
-        onec — сервис OneCGateway (может быть None); fetch_bank_balance() → str | None.
     """
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("A positive explicit organization_id is required")
     # ──── inflows: receivable paid/received ────
     q_in = select(func.coalesce(func.sum(Payment.amount), 0)).where(
+        Payment.organization_id == organization_id,
         Payment.kind.in_(_INFLOW_KIND),
         Payment.status.in_(_INFLOW_STATUS),
     )
@@ -64,6 +66,7 @@ async def cashflow_report(
     q_out = (
         select(Payment.kind, func.coalesce(func.sum(Payment.amount), 0))
         .where(
+            Payment.organization_id == organization_id,
             Payment.status.in_(_OUTFLOW_STATUS),
             Payment.kind.in_(_OUTFLOW_KINDS),
         )
@@ -82,24 +85,19 @@ async def cashflow_report(
     outflows = sum(out_by_kind.values(), Decimal("0"))
     net = inflows - outflows
 
-    # ──── bank_balance (honest-empty: None при mock / нет сервиса) ────
-    bank_balance: str | None = None
-    if onec is not None:
-        try:
-            raw = await onec.fetch_bank_balance()
-            if raw is not None:
-                bank_balance = _fmt(Decimal(str(raw)))
-        except Exception:  # noqa: BLE001 — fall-soft: 1С недоступна
-            pass
-
     return {
+        "calculation_basis": "Полные суммы по статусам платежей и дате создания; частичные оплаты не включены.",
+        "limitations": [
+            "Это проекция зарегистрированных статусов, не подтверждение банковского движения.",
+            "Банковский остаток выбранной организации не подтверждён.",
+        ],
         "period_from": from_date.isoformat() if from_date else None,
         "period_to": to_date.isoformat() if to_date else None,
         "currency": "BYN",
         "inflows": _fmt(inflows),
         "outflows": _fmt(outflows),
         "net_cashflow": _fmt(net),
-        "bank_balance": bank_balance,
+        "bank_balance": None,
         "breakdown": {
             "receivable": _fmt(inflows),
             **{k: _fmt(out_by_kind[k]) for k in _OUTFLOW_KINDS},

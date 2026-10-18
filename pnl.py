@@ -9,7 +9,7 @@
   - payroll, opex, tax, bank_fee: + (операционные расходы)
 
 НЕ смешивать с summary.py (cash-basis: receivable) — разные оси учёта.
-Ledger/НДС/ЭСЧФ остаются в 1С.
+Это проекция зарегистрированных строк; полнота фактической себестоимости не подтверждена.
 """
 from __future__ import annotations
 
@@ -53,6 +53,8 @@ async def pnl_report(
     session: AsyncSession,
     from_date: date | None = None,
     to_date: date | None = None,
+    *,
+    organization_id: int,
 ) -> dict:
     """Агрегат P&L за период (все суммы — строки BYN).
 
@@ -64,9 +66,11 @@ async def pnl_report(
 
     Все компоненты возвращаются строками для избежания float-дрейфа.
     """
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("A positive explicit organization_id is required")
     q_base = select(Payment.kind, func.coalesce(func.sum(Payment.amount), 0)).group_by(
         Payment.kind
-    )
+    ).where(Payment.organization_id == organization_id)
     if from_date is not None:
         q_base = q_base.where(func.date(Payment.created_at) >= from_date.isoformat())
     if to_date is not None:
@@ -93,6 +97,11 @@ async def pnl_report(
     operating_profit = gross_profit - freight_net - payroll - opex - tax - bank_fee
 
     return {
+        "calculation_basis": "Зарегистрированные строки платежей по дате создания; все статусы.",
+        "limitations": [
+            "Полнота фактической себестоимости и прибыли не подтверждена.",
+            "Нулевая зарегистрированная себестоимость не означает нулевую фактическую себестоимость.",
+        ],
         "from_date": from_date.isoformat() if from_date else None,
         "to_date": to_date.isoformat() if to_date else None,
         "currency": "BYN",

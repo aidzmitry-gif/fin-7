@@ -70,8 +70,12 @@ def _row(key, agg: dict[str, Decimal]) -> dict:
     }
 
 
-async def _grouped(session: AsyncSession, group_field) -> list[dict]:
-    rows = (await session.execute(select(Payment))).scalars().all()
+async def _grouped(session: AsyncSession, group_field, *, organization_id: int) -> list[dict]:
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("organization_id must be a positive integer")
+    rows = (await session.execute(
+        select(Payment).where(Payment.organization_id == organization_id)
+    )).scalars().all()
     by: dict[object, dict[str, Decimal]] = {}
     for p in rows:
         if p.kind not in _MARGIN_KINDS:
@@ -102,13 +106,13 @@ async def _grouped(session: AsyncSession, group_field) -> list[dict]:
     return result
 
 
-async def margin_by_deal(session: AsyncSession) -> dict:
-    rows = await _grouped(session, "deal_id")
+async def margin_by_deal(session: AsyncSession, *, organization_id: int) -> dict:
+    rows = await _grouped(session, "deal_id", organization_id=organization_id)
     return {"currency": "BYN", "items": rows}
 
 
-async def margin_by_counterparty(session: AsyncSession) -> dict:
-    rows = await _grouped(session, "counterparty_ref")
+async def margin_by_counterparty(session: AsyncSession, *, organization_id: int) -> dict:
+    rows = await _grouped(session, "counterparty_ref", organization_id=organization_id)
     return {"currency": "BYN", "items": rows}
 
 

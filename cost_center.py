@@ -39,9 +39,13 @@ async def group_by_cost_center(
     session: AsyncSession,
     from_: date | None = None,
     to: date | None = None,
+    *,
+    organization_id: int,
 ) -> dict:
     """Сумма по центрам затрат за период. Расход/доход разводим по знаку kind."""
-    q = select(Payment)
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("organization_id must be a positive integer")
+    q = select(Payment).where(Payment.organization_id == organization_id)
     if from_ is not None:
         q = q.where(Payment.created_at >= from_)
     if to is not None:

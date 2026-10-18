@@ -4,7 +4,18 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, func
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db.base import Base
@@ -19,9 +30,24 @@ class Payment(Base):
     """
 
     __tablename__ = "payment"
-    __table_args__ = {"schema": "finance"}
+    __table_args__ = (
+        CheckConstraint(
+            "organization_id IS NULL OR organization_id > 0",
+            name="ck_finance_payment_organization_positive",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "account_id"],
+            ["finance.bank_account.organization_id", "finance.bank_account.id"],
+            name="fk_finance_payment_account_organization",
+            ondelete="RESTRICT",
+        ),
+        {"schema": "finance"},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounting.organization.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     ref: Mapped[str] = mapped_column(String(255))
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0")
     status: Mapped[str] = mapped_column(String(32), default="pending", server_default="pending")
@@ -41,9 +67,9 @@ class Payment(Base):
     # amount_orig + currency — оригинал из payload (None при BYN-в-источнике)
     currency: Mapped[str] = mapped_column(String(3), default="BYN", server_default="BYN")
     amount_orig: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
-    # банк-счёт (0075, Р4): None = «основной кэш» (для совместимости с лайфом до Р4)
+    # None: счёт не выбран внутри организации; NULL owner — неизвестная legacy-принадлежность.
     account_id: Mapped[int | None] = mapped_column(
-        ForeignKey("finance.bank_account.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("finance.bank_account.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     # Р5: ссылка-провенанс для идемпотентности (например "deal:42", "payroll:7")
     entity_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
@@ -66,10 +92,21 @@ class BankAccount(Base):
     """
 
     __tablename__ = "bank_account"
-    __table_args__ = {"schema": "finance"}
+    __table_args__ = (
+        CheckConstraint(
+            "organization_id IS NULL OR organization_id > 0",
+            name="ck_finance_bank_account_organization_positive",
+        ),
+        UniqueConstraint("organization_id", "code", name="uq_finance_bank_account_organization_code"),
+        UniqueConstraint("organization_id", "id", name="uq_finance_bank_account_organization_id"),
+        {"schema": "finance"},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True)
+    organization_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounting.organization.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    code: Mapped[str] = mapped_column(String(32))
     title: Mapped[str] = mapped_column(String(120))
     currency: Mapped[str] = mapped_column(String(3), default="BYN", server_default="BYN")
     opening_balance: Mapped[Decimal] = mapped_column(

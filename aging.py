@@ -38,12 +38,15 @@ def _bucket(due: date | None, today: date) -> str:
 
 
 async def _payments_outstanding(
-    session: AsyncSession, kinds: tuple[str, ...]
+    session: AsyncSession, kinds: tuple[str, ...], *, organization_id: int
 ) -> list[tuple[Payment, Decimal]]:
     """Платежи нужных видов с непокрытым остатком (outstanding > 0)."""
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("organization_id must be a positive integer")
     rows = (
         await session.execute(
             select(Payment).where(
+                Payment.organization_id == organization_id,
                 Payment.kind.in_(kinds), Payment.status.in_(("planned", "pending", "partial"))
             )
         )
@@ -69,11 +72,11 @@ async def _payments_outstanding(
 
 
 async def _side(
-    session: AsyncSession, kinds: tuple[str, ...], today: date
+    session: AsyncSession, kinds: tuple[str, ...], today: date, *, organization_id: int
 ) -> dict:
     """Свернуть платежи в корзины + total."""
     buckets = {b: Decimal("0") for b in BUCKETS}
-    for p, outstanding in await _payments_outstanding(session, kinds):
+    for p, outstanding in await _payments_outstanding(session, kinds, organization_id=organization_id):
         buckets[_bucket(p.due_date, today)] += outstanding
     total = sum(buckets.values(), Decimal("0"))
     return {
@@ -82,11 +85,13 @@ async def _side(
     }
 
 
-async def aging_buckets(session: AsyncSession, today: date | None = None) -> dict:
+async def aging_buckets(
+    session: AsyncSession, today: date | None = None, *, organization_id: int
+) -> dict:
     today = today or date.today()
     return {
         "as_of": today.isoformat(),
         "currency": "BYN",
-        "ar": await _side(session, AR_KINDS, today),
-        "ap": await _side(session, AP_KINDS, today),
+        "ar": await _side(session, AR_KINDS, today, organization_id=organization_id),
+        "ap": await _side(session, AP_KINDS, today, organization_id=organization_id),
     }

@@ -43,6 +43,7 @@ async def apply_allocation(
     # The caller may have loaded this invoice before replacement or settlement.
     # Refresh under the same row lock used to retire an invoice's demand.
     await session.refresh(payment, with_for_update=True)
+    owner = {"organization_id": payment.organization_id} if payment.organization_id is not None else {}
     alloc = PaymentAllocation(payment_id=payment.id, amount=amount)
     session.add(alloc)
     await session.flush()
@@ -53,6 +54,7 @@ async def apply_allocation(
         session,
         "finance.payment.received",
         {
+            **owner,
             "ref": payment.ref,
             "amount": str(amount),
             "entity_ref": f"payment:{payment.id}",
@@ -68,7 +70,7 @@ async def apply_allocation(
             event_bus.emit(
                 session,
                 "finance.payment.paid",
-                {"ref": payment.ref, "deal_id": payment.deal_id, "entity_ref": f"payment:{payment.id}"},
+                {**owner, "ref": payment.ref, "deal_id": payment.deal_id, "entity_ref": f"payment:{payment.id}"},
             )
     elif total > 0 and payment.status not in {"paid", "superseded"}:
         payment.status = "partial"
