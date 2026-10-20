@@ -53,7 +53,8 @@ async def reconcile_with_onec(session: AsyncSession, gateway) -> dict:
     """Сопоставить платежи ERP с тем, что вернул 1С.
 
     Возвращает ``{matched, only_in_erp, only_in_1c, as_of, source, source_available}``.
-    При недоступности 1С (нет шлюза / нет метода / падение / пусто) — source_available=False.
+    При недоступности 1С (нет шлюза / нет метода / явный отказ / сбой) — source_available=False.
+    Пустой ответ доступного источника допустим; отсутствие адаптера не означает пустой учёт.
 
     Матчинг — **по парам в bucket'е ключа** (Round-5 К5-1): для каждого ключа берём
     min(len(erp), len(onec)) пар → matched; остаток ERP → only_in_erp; остаток 1С →
@@ -65,7 +66,8 @@ async def reconcile_with_onec(session: AsyncSession, gateway) -> dict:
     as_of = datetime.now(UTC).isoformat()
     onec_rows: list[dict] = []
     source_available = False
-    if gateway is not None and hasattr(gateway, "fetch_payments"):
+    if (gateway is not None and hasattr(gateway, "fetch_payments")
+            and getattr(gateway, "financial_source_available", True) is True):
         try:
             onec_rows = list(await gateway.fetch_payments())
             source_available = True
@@ -110,6 +112,9 @@ async def reconcile_with_onec(session: AsyncSession, gateway) -> dict:
         "as_of": as_of,
         "source": "1c",
         "source_available": source_available,
+        "source_reason": None if source_available else (
+            getattr(gateway, "financial_source_reason", None) or "Источник платежей 1С недоступен"
+        ),
         "matched": matched,
         "only_in_erp": only_in_erp,
         "only_in_1c": only_in_1c,

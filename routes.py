@@ -6,13 +6,14 @@ import io
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
+from core.services.auth import get_current_user
 from modules.finance.allocation import apply_allocation, sum_allocations
 from modules.finance.models import BankAccount, BankTransaction, Payment, PaymentAllocation
 from modules.finance.schemas import (
@@ -32,6 +33,20 @@ from modules.finance.schemas import (
 from modules.finance.summary import finance_summary
 
 router = APIRouter(tags=["finance"])
+
+
+async def _report_organization(
+    organization_id: int = Query(..., gt=0),
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
+) -> int:
+    gateway = getattr(core.services, "accounting", None)
+    if gateway is None:
+        raise HTTPException(503, "Organization access service unavailable")
+    await gateway.finance_member(session, organization_id, user, write=False)
+    return organization_id
+
 
 
 # ───────────────────────── Сводка / Aging / Cash-flow / Маржа / Сверка ─────────────────────────
@@ -130,11 +145,9 @@ async def margin_reconcile_deal(
 async def reconcile_1c(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
 ):
-    """Сверка платежей ERP с 1С (ЧТЕНИЕ, fail-soft). 1С недоступна → source_available=False."""
-    from modules.finance.reconcile import reconcile_with_onec
-
-    return await reconcile_with_onec(session, getattr(core.services, "onec", None))
+    raise HTTPException(503, 'Сверка с 1С по организации недоступна: принадлежность источника платежей ещё не подтверждена.')
 
 
 # ───────────────────────── ДДС (Р6) ─────────────────────────
