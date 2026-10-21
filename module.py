@@ -4,7 +4,12 @@ from __future__ import annotations
 from core.runtime.contract import ModuleContract, Widget
 from core.runtime.core import Core
 from modules.finance import routes
-from modules.finance.document_versions import on_original_issued, on_original_superseded
+from modules.finance.document_versions import (
+    on_invoice_cancelled,
+    on_invoice_issued,
+    on_original_issued,
+    on_original_superseded,
+)
 from modules.finance.events import (
     on_claim_resolved,
     on_deal_handoff,
@@ -28,6 +33,8 @@ class FinanceModule(ModuleContract):
         # межмодульная связь: счёт из sales → платёж в finance (§2.5)
         core.subscribe("sales.document.posted", on_original_issued)
         core.subscribe("sales.document.superseded", on_original_superseded)
+        core.subscribe("sales.invoice.issued", on_invoice_issued)
+        core.subscribe("sales.invoice.cancelled", on_invoice_cancelled)
         # логистика → финансы: доставлено → расход на фрахт (§2.5)
         core.subscribe("logistics.freight.cost", on_freight_cost)
         # логистика → финансы: аудит счёта выявил переплату → возврат (кредит против фрахта)

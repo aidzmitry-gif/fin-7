@@ -46,7 +46,15 @@ async def on_document_posted(payload: dict, ctx) -> None:
     """
     if payload.get("kind") != "invoice" or ctx is None:
         return
-    amount = _to_decimal(payload.get("amount"))
+    raw_amount = payload.get("amount")
+    if isinstance(raw_amount, bool):
+        raise ValueError("Invoice amount must be a finite number")
+    try:
+        amount = Decimal(str(raw_amount))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("Invoice amount is invalid") from None
+    if not amount.is_finite():
+        raise ValueError("Invoice amount must be finite")
     currency = (payload.get("currency") or BASE_CCY).strip().upper()
     amount_byn = await event_amount(amount, currency, payload, ctx)
     ctx.session.add(
