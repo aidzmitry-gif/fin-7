@@ -11,7 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 
 def money_str(value: object) -> str:
@@ -33,6 +33,7 @@ OptMoneyStr = Annotated[str | None, BeforeValidator(_opt_money_str)]
 
 
 class PaymentCreate(BaseModel):
+    organization_id: int = Field(gt=0, strict=True)
     ref: str
     amount: MoneyStr = "0.00"
     status: str = "pending"
@@ -46,6 +47,7 @@ class PaymentCreate(BaseModel):
 
 
 class PaymentOut(BaseModel):
+    organization_id: int | None = None
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -63,6 +65,7 @@ class PaymentOut(BaseModel):
     # Вычисляемые поля (заполняются в роутере):
     outstanding: OptMoneyStr = None  # остаток к поступлению (amount − sum allocations)
     is_overdue: bool | None = None  # status in (pending, partial) and due_date < today
+    source_controlled: bool = False
 
 
 class StatusUpdate(BaseModel):
@@ -92,6 +95,7 @@ class PaymentDetail(PaymentOut):
 
 
 class BankAccountCreate(BaseModel):
+    organization_id: int = Field(gt=0, strict=True)
     code: str
     title: str
     currency: str = "BYN"
@@ -107,6 +111,7 @@ class BankAccountUpdate(BaseModel):
 
 
 class BankAccountOut(BaseModel):
+    organization_id: int | None = None
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -126,6 +131,7 @@ class BankTxOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    organization_id: int | None = None
     id: int
     ext_id: str
     occurred_on: date | None = None

@@ -15,7 +15,7 @@ from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from core.services.auth import get_current_user
 from modules.finance.allocation import apply_allocation, sum_allocations
-from modules.finance.models import BankAccount, BankTransaction, Payment, PaymentAllocation
+from modules.finance.models import BankAccount, BankTransaction, Payment, PaymentAllocation, is_landed_projection
 from modules.finance.schemas import (
     AllocationCreate,
     AllocationOut,
@@ -49,21 +49,54 @@ async def _report_organization(
 
 
 
+async def _write_organization(
+    organization_id: int = Query(..., gt=0),
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
+) -> int:
+    gateway = getattr(core.services, "accounting", None)
+    if gateway is None:
+        raise HTTPException(503, "Organization access service unavailable")
+    await gateway.finance_member(session, organization_id, user, write=True)
+    return organization_id
+
+
+
+def _organization_report(report: dict, organization_id: int) -> dict:
+    return {
+        **report,
+        "organization_id": organization_id,
+        "provisional": True,
+        "source_completeness": {
+            "status": "unknown",
+            "reason": "finance_source_coverage_not_confirmed",
+        },
+    }
+
+
+
 # ───────────────────────── Сводка / Aging / Cash-flow / Маржа / Сверка ─────────────────────────
 
 
 @router.get("/summary")
-async def get_summary(session: AsyncSession = Depends(get_session)):
+async def get_summary(
+    session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
+):
     """Операционная сводка: фактическая маржа (выручка − landed − фрахт) + касса (ДДС-lite)."""
-    return await finance_summary(session)
+    return _organization_report(await finance_summary(session, organization_id=organization_id), organization_id)
 
 
 @router.get("/aging")
-async def get_aging(session: AsyncSession = Depends(get_session)):
+async def get_aging(
+    session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
+):
     """AR/AP по корзинам срока (current/1-30/31-60/61-90/90+/без срока)."""
     from modules.finance.aging import aging_buckets
 
-    return await aging_buckets(session)
+    return _organization_report(await aging_buckets(session, organization_id=organization_id), organization_id)
 
 
 @router.get("/cashflow-forecast")
@@ -71,25 +104,34 @@ async def get_cashflow_forecast(
     weeks: int = 8,
     mode: str = "week",
     days: int = 30,
-    account_id: int | None = None,
+    account_id: int | None = Query(None, gt=0),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
 ):
     """Понедельный (mode='week') или подневный (mode='day') прогноз кэш-фло (Р4).
 
     Опц. ``account_id`` — фильтр по банк-счёту (платежи без account_id — общий кэш,
     не суммируются в выбранный счёт). Без ``account_id`` — все платежи.
     """
-    from modules.finance.cashflow import cashflow_forecast
+    from core.services.nbrb import RateUnavailable
+    from modules.finance.cashflow import FinanceAccountUnavailable, cashflow_forecast
 
     if mode not in ("week", "day"):
         mode = "week"
-    return await cashflow_forecast(
-        session,
-        weeks=max(1, min(weeks, 52)),
-        days=max(1, min(days, 90)),
-        mode=mode,  # type: ignore[arg-type]
-        account_id=account_id,
-    )
+    try:
+        report = await cashflow_forecast(
+            session,
+            weeks=max(1, min(weeks, 52)),
+            days=max(1, min(days, 90)),
+            mode=mode,  # type: ignore[arg-type]
+            account_id=account_id,
+            organization_id=organization_id,
+        )
+    except FinanceAccountUnavailable as exc:
+        raise HTTPException(404, "Bank account unavailable in this organization") from exc
+    except RateUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return _organization_report(report, organization_id)
 
 
 @router.get("/by-cost-center")
@@ -351,57 +393,46 @@ def _safe_date(raw: str | None) -> date | None:
 
 @router.get("/bank-accounts", response_model=list[BankAccountOut])
 async def list_bank_accounts(
-    active_only: bool = True, session: AsyncSession = Depends(get_session)
+    active_only: bool = True,
+    session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
 ):
-    """Список банковских счетов (по умолчанию только активные)."""
-    q = select(BankAccount).order_by(BankAccount.id)
+    """Счета выбранной организации (по умолчанию только активные)."""
+    q = select(BankAccount).where(BankAccount.organization_id == organization_id).order_by(BankAccount.id)
     if active_only:
         q = q.where(BankAccount.is_active == 1)
     rows = (await session.execute(q)).scalars().all()
-    return [
-        {
-            "id": a.id,
-            "code": a.code,
-            "title": a.title,
-            "currency": a.currency,
-            "opening_balance": money_str(a.opening_balance),
-            "opening_at": a.opening_at,
-            "is_active": bool(a.is_active),
-        }
-        for a in rows
-    ]
+    return [BankAccountOut.model_validate(a).model_dump() for a in rows]
 
 
 @router.post("/bank-accounts", response_model=BankAccountOut, status_code=201)
 async def create_bank_account(
-    payload: BankAccountCreate, session: AsyncSession = Depends(get_session)
+    payload: BankAccountCreate,
+    session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_write_organization),
 ):
-    """Завести банк-счёт / кассу. ``code`` уникален."""
-    exists = (
-        await session.execute(select(BankAccount).where(BankAccount.code == payload.code))
-    ).scalar_one_or_none()
+    """Завести счёт / кассу. Код уникален внутри организации."""
+    if payload.organization_id != organization_id:
+        raise HTTPException(422, "Организация запроса и счёта не совпадает")
+    exists = (await session.execute(select(BankAccount).where(
+        BankAccount.organization_id == organization_id, BankAccount.code == payload.code
+    ))).scalar_one_or_none()
     if exists is not None:
-        raise HTTPException(status_code=409, detail=f"Счёт {payload.code!r} уже существует")
+        raise HTTPException(409, "Счёт с таким кодом уже существует в организации")
     obj = BankAccount(
-        code=payload.code,
-        title=payload.title,
-        currency=payload.currency,
-        opening_balance=Decimal(str(payload.opening_balance)),
-        opening_at=payload.opening_at,
-        is_active=1,
+        organization_id=organization_id, code=payload.code, title=payload.title,
+        currency=payload.currency, opening_balance=Decimal(str(payload.opening_balance)),
+        opening_at=payload.opening_at, is_active=1,
     )
     session.add(obj)
-    await session.commit()
-    await session.refresh(obj)
-    return {
-        "id": obj.id,
-        "code": obj.code,
-        "title": obj.title,
-        "currency": obj.currency,
-        "opening_balance": money_str(obj.opening_balance),
-        "opening_at": obj.opening_at,
-        "is_active": bool(obj.is_active),
-    }
+    try:
+        await session.flush()
+        out = BankAccountOut.model_validate(obj).model_dump()
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Не удалось создать счёт: конфликт данных организации") from exc
+    return out
 
 
 @router.patch("/bank-accounts/{account_id}", response_model=BankAccountOut)
@@ -409,11 +440,14 @@ async def update_bank_account(
     account_id: int,
     payload: BankAccountUpdate,
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_write_organization),
 ):
-    """Частичное обновление: title / opening / активность. ``code`` менять нельзя."""
-    obj = await session.get(BankAccount, account_id)
+    """Частичное обновление: title / opening / активность. Владелец и код неизменны."""
+    obj = (await session.execute(select(BankAccount).where(
+        BankAccount.id == account_id, BankAccount.organization_id == organization_id
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if obj is None:
-        raise HTTPException(status_code=404, detail="Счёт не найден")
+        raise HTTPException(404, "Счёт не найден")
     data = payload.model_dump(exclude_unset=True)
     if "title" in data and data["title"] is not None:
         obj.title = data["title"]
@@ -423,17 +457,10 @@ async def update_bank_account(
         obj.opening_balance = Decimal(str(data["opening_balance"]))
     if "opening_at" in data:
         obj.opening_at = data["opening_at"]
+    await session.flush()
+    out = BankAccountOut.model_validate(obj).model_dump()
     await session.commit()
-    await session.refresh(obj)
-    return {
-        "id": obj.id,
-        "code": obj.code,
-        "title": obj.title,
-        "currency": obj.currency,
-        "opening_balance": money_str(obj.opening_balance),
-        "opening_at": obj.opening_at,
-        "is_active": bool(obj.is_active),
-    }
+    return out
 
 
 # ───────────────────────── Платежи ─────────────────────────
@@ -450,6 +477,7 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
     )
     return {
         "id": p.id,
+        "organization_id": p.organization_id,
         "ref": p.ref,
         "amount": money_str(p.amount),
         "currency": p.currency,
@@ -461,47 +489,56 @@ def _enrich(p: Payment, allocated: Decimal, today: date | None = None) -> dict:
         "deal_id": p.deal_id,
         "counterparty_ref": p.counterparty_ref,
         "account_id": p.account_id,
-        "outstanding": money_str(outstanding),
+        "outstanding": None if is_landed_projection(p) else money_str(outstanding),
         "is_overdue": is_overdue,
+        "source_controlled": is_landed_projection(p) or bool(p.entity_ref and p.entity_ref.startswith("document:")),
     }
 
 
 @router.get("/payments", response_model=list[PaymentOut])
 async def list_payments(
-    account_id: int | None = None, session: AsyncSession = Depends(get_session)
+    account_id: int | None = Query(None, gt=0),
+    session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
 ):
-    """Платежи (с outstanding и is_overdue, посчитанными на чтении). Опц. фильтр по счёту."""
-    q = select(Payment).order_by(Payment.id.desc())
+    """Платежи организации с остатком; необязательный фильтр по её счёту."""
+    if account_id is not None:
+        account = (await session.execute(select(BankAccount).where(
+            BankAccount.id == account_id, BankAccount.organization_id == organization_id
+        ))).scalar_one_or_none()
+        if account is None:
+            raise HTTPException(404, "Счёт не найден")
+    q = select(Payment).where(Payment.organization_id == organization_id).order_by(Payment.id.desc())
     if account_id is not None:
         q = q.where(Payment.account_id == account_id)
     rows = (await session.execute(q)).scalars().all()
-    # Aggregated allocations: один запрос вместо N+1
-    sums = dict(
-        (
-            await session.execute(
-                select(PaymentAllocation.payment_id, func.sum(PaymentAllocation.amount)).group_by(
-                    PaymentAllocation.payment_id
-                )
-            )
-        ).all()
-    )
+    if not rows:
+        return []
+    sums = dict((await session.execute(
+        select(PaymentAllocation.payment_id, func.sum(PaymentAllocation.amount))
+        .where(PaymentAllocation.payment_id.in_([p.id for p in rows]))
+        .group_by(PaymentAllocation.payment_id)
+    )).all())
     today = date.today()
     return [_enrich(p, Decimal(str(sums.get(p.id, 0))), today) for p in rows]
 
 
 @router.get("/payments/{payment_id}", response_model=PaymentDetail)
-async def get_payment(payment_id: int, session: AsyncSession = Depends(get_session)):
-    """Платёж + список частичных поступлений + остаток (outstanding)."""
-    obj = await session.get(Payment, payment_id)
+async def get_payment(
+    payment_id: int,
+    session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_report_organization),
+):
+    """Платёж организации и его частичные поступления."""
+    obj = (await session.execute(select(Payment).where(
+        Payment.id == payment_id, Payment.organization_id == organization_id
+    ))).scalar_one_or_none()
     if obj is None:
-        raise HTTPException(status_code=404, detail="Платёж не найден")
-    allocs = (
-        await session.execute(
-            select(PaymentAllocation)
-            .where(PaymentAllocation.payment_id == payment_id)
-            .order_by(PaymentAllocation.id.desc())
-        )
-    ).scalars().all()
+        raise HTTPException(404, "Платёж не найден")
+    allocs = (await session.execute(
+        select(PaymentAllocation).where(PaymentAllocation.payment_id == payment_id)
+        .order_by(PaymentAllocation.id.desc())
+    )).scalars().all()
     allocated = sum((Decimal(str(a.amount)) for a in allocs), Decimal("0"))
     out = _enrich(obj, allocated)
     out["allocations"] = [AllocationOut.model_validate(a).model_dump() for a in allocs]
@@ -509,41 +546,47 @@ async def get_payment(payment_id: int, session: AsyncSession = Depends(get_sessi
 
 
 @router.post("/payments", response_model=PaymentOut, status_code=201)
-async def create_payment(payload: PaymentCreate, session: AsyncSession = Depends(get_session)):
-    """Зафиксировать платёж (lifecycle + провенанс — опционально)."""
+async def create_payment(
+    payload: PaymentCreate,
+    session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_write_organization),
+):
+    """Зафиксировать платёж выбранной организации."""
     from core.domain.models import AuditLog
     from core.services import nbrb
 
+    if payload.organization_id != organization_id:
+        raise HTTPException(422, "Организация запроса и платежа не совпадает")
+    if payload.account_id is not None:
+        account = (await session.execute(select(BankAccount).where(
+            BankAccount.id == payload.account_id, BankAccount.organization_id == organization_id
+        ))).scalar_one_or_none()
+        if account is None:
+            raise HTTPException(404, "Счёт не найден")
     currency = payload.currency.strip().upper()
     if currency != "BYN" and payload.operation_date is None:
-        raise HTTPException(status_code=422, detail="Укажите дату валютной операции")
+        raise HTTPException(422, "Укажите дату валютной операции")
     try:
         amount, quote = await nbrb.convert(
             session, payload.amount, currency, payload.operation_date or nbrb.today()
         )
     except nbrb.RateUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(503, str(exc)) from exc
     obj = Payment(
-        ref=payload.ref,
-        amount=amount,
-        currency=currency,
+        organization_id=organization_id, ref=payload.ref, amount=amount, currency=currency,
         amount_orig=Decimal(payload.amount) if currency != "BYN" else None,
-        status=payload.status,
-        kind=payload.kind,
-        due_date=payload.due_date,
-        deal_id=payload.deal_id,
-        counterparty_ref=payload.counterparty_ref,
-        account_id=payload.account_id,
+        status=payload.status, kind=payload.kind, due_date=payload.due_date,
+        deal_id=payload.deal_id, counterparty_ref=payload.counterparty_ref, account_id=payload.account_id,
     )
     session.add(obj)
     await session.flush()
     session.add(AuditLog(actor="finance", action="finance.fx.applied",
                          entity_ref=f"payment:{obj.id}",
-                         detail={"amount_original": payload.amount,
-                                 "amount_byn": str(amount), "quote": quote}))
+                         detail={"amount_original": payload.amount, "amount_byn": str(amount), "quote": quote}))
+    await session.flush()
+    out = PaymentOut.model_validate(_enrich(obj, Decimal("0"))).model_dump()
     await session.commit()
-    await session.refresh(obj)
-    return _enrich(obj, Decimal("0"))
+    return out
 
 
 @router.patch("/payments/{payment_id}", response_model=PaymentOut)
@@ -552,63 +595,71 @@ async def update_payment(
     payload: StatusUpdate,
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_write_organization),
 ):
-    """Сменить статус платежа. При ``paid`` — paid_at=now() + событие finance.payment.paid."""
-    obj = await session.get(Payment, payment_id)
+    """Сменить статус. Ручная отметка paid сохраняет прежнюю семантику."""
+    obj = (await session.execute(select(Payment).where(
+        Payment.id == payment_id, Payment.organization_id == organization_id
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if obj is None:
-        raise HTTPException(status_code=404, detail="Платёж не найден")
+        raise HTTPException(404, "Платёж не найден")
+    if is_landed_projection(obj):
+        raise HTTPException(409, "Расчёт себестоимости не является оплатой. Его состояние определяется исходной закупкой")
+    if obj.entity_ref and obj.entity_ref.startswith("document:"):
+        raise HTTPException(409, "Статус этого требования определяется исходным счётом и поступлениями")
     obj.status = payload.status
     if payload.status == "paid":
         obj.paid_at = datetime.now(UTC)
-        core.event_bus.emit(
-            session, "finance.payment.paid", {"ref": obj.ref, "deal_id": obj.deal_id, "entity_ref": f"payment:{obj.id}"}
-        )
-    await session.commit()
-    await session.refresh(obj)
+        core.event_bus.emit(session, "finance.payment.paid", {
+            "ref": obj.ref, "deal_id": obj.deal_id, "entity_ref": f"payment:{obj.id}",
+            "organization_id": obj.organization_id,
+        })
+    await session.flush()
     allocated = await sum_allocations(session, payment_id)
-    return _enrich(obj, allocated)
+    out = PaymentOut.model_validate(_enrich(obj, allocated)).model_dump()
+    await session.commit()
+    return out
 
 
-@router.post(
-    "/payments/{payment_id}/allocations",
-    response_model=AllocationOut,
-    status_code=201,
-)
+@router.post("/payments/{payment_id}/allocations", response_model=AllocationOut, status_code=201)
 async def create_allocation(
     payment_id: int,
     payload: AllocationCreate,
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_write_organization),
 ):
-    """Зафиксировать частичное поступление. Статус платежа авто:
-    sum=amount → paid (эмит finance.payment.paid), 0<sum<amount → partial, =0 → pending.
-    """
-    payment = await session.get(Payment, payment_id)
+    """Частичное поступление по платежу выбранной организации."""
+    payment = (await session.execute(select(Payment).where(
+        Payment.id == payment_id, Payment.organization_id == organization_id
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if payment is None:
-        raise HTTPException(status_code=404, detail="Платёж не найден")
+        raise HTTPException(404, "Платёж не найден")
+    if is_landed_projection(payment):
+        raise HTTPException(409, "К расчёту себестоимости нельзя добавить поступление денег")
+    if payment.status in {"cancelled", "superseded"}:
+        raise HTTPException(409, "Счёт отменён или заменён. Новое поступление к нему вручную не добавляется")
     amt = Decimal(str(payload.amount))
     if amt <= 0:
-        raise HTTPException(status_code=400, detail="Сумма поступления должна быть > 0")
-    # Единый путь проведения (ручной ввод и банк-импорт): apply_allocation считает статус
-    # и эмитит finance.payment.received (+ .paid при полном закрытии).
+        raise HTTPException(400, "Сумма поступления должна быть > 0")
     from core.domain.models import AuditLog
     from core.services import nbrb
 
     currency = payload.currency.strip().upper()
     if currency != "BYN" and payload.operation_date is None:
-        raise HTTPException(status_code=422, detail="Укажите дату валютного поступления")
+        raise HTTPException(422, "Укажите дату валютного поступления")
     try:
         amt, quote = await nbrb.convert(session, amt, currency, payload.operation_date or nbrb.today())
     except nbrb.RateUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(503, str(exc)) from exc
     alloc = await apply_allocation(session, core.event_bus, payment, amt)
     session.add(AuditLog(actor="finance", action="finance.fx.applied",
                          entity_ref=f"allocation:{alloc.id}",
-                         detail={"amount_original": payload.amount, "amount_byn": str(amt),
-                                 "quote": quote}))
+                         detail={"amount_original": payload.amount, "amount_byn": str(amt), "quote": quote}))
+    await session.flush()
+    out = AllocationOut.model_validate(alloc).model_dump()
     await session.commit()
-    await session.refresh(alloc)
-    return alloc
+    return out
 
 
 # ───────────────────────── Банк: входящие зачисления (Альфа host-to-host) ─────────────────────────
@@ -618,82 +669,91 @@ async def create_allocation(
 async def bank_sync(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    organization_id: int = Depends(_write_organization),
 ):
-    """Опросить банк, идемпотентно провести зачисления, сматчить к счетам (Альфа, слайс 1).
-
-    Источник — ``core.services.bank`` (нет кредов → пусто, честная деградация). Под гейтом
-    модуля ``finance`` (аноним/чужая роль → 403 middleware). Возврат — сводка sync.
-    """
-    from modules.finance.bank_ingest import BankSourceIdentityConflict, sync_incoming
-    from modules.finance.official_fx import BankAmountInvalid, BankCurrencyInvalid
-
-    gateway = getattr(core.services, "bank", None)
-    try:
-        summary = await sync_incoming(session, gateway, core.event_bus)
-        await session.commit()
-    except (BankCurrencyInvalid, BankAmountInvalid) as exc:
-        await session.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except BankSourceIdentityConflict as exc:
-        await session.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(status_code=409, detail="Конфликт банковских операций. Сверьте уже загруженные источники перед повторным импортом.") from exc
-    except Exception as exc:  # noqa: BLE001 — ошибку банка отдаём вызывающему как 502, не 500
-        await session.rollback()
-        raise HTTPException(status_code=502, detail=f"Банк недоступен: {exc}") from exc
-    return {"ok": True, **summary}
+    raise HTTPException(503, 'Синхронизация банка по организации недоступна: принадлежность канала выписки ещё не подтверждена.')
 
 
 @router.get("/bank/transactions", response_model=list[BankTxOut])
 async def list_bank_transactions(
-    status: str | None = None, session: AsyncSession = Depends(get_session)
+    status: str | None = None,
+    organization_id: int = Query(..., gt=0),
+    core: Core = Depends(get_core),
+    session: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
 ):
-    """Ledger зачислений; ``?status=unmatched`` — очередь «разобрать вручную»."""
-    # Full statements are reviewed in the organization-scoped accounting queue.
+    """Очередь зачислений с подтверждённой принадлежностью выбранной организации."""
+    gateway = getattr(core.services, "accounting", None)
+    if gateway is None:
+        raise HTTPException(503, "Organization access service unavailable")
+    ids = await gateway.finance_bank_transaction_ids(session, organization_id, user)
+    if not ids:
+        return []
     q = select(BankTransaction).where(
-        BankTransaction.source_provider.is_(None),
+        BankTransaction.id.in_(ids),
         BankTransaction.direction == "receipt",
+        BankTransaction.source_provider.is_(None),
+        BankTransaction.source_external_id.is_(None),
+        BankTransaction.source_kind.is_(None),
+        BankTransaction.source_reference.is_(None),
     ).order_by(BankTransaction.id.desc())
     if status:
         q = q.where(BankTransaction.match_status == status)
-    return (await session.execute(q)).scalars().all()
+    rows = (await session.execute(q)).scalars().all()
+    return [{**BankTxOut.model_validate(row).model_dump(), "organization_id": organization_id} for row in rows]
 
 
 @router.post("/bank/transactions/{tx_id}/match", response_model=BankTxOut)
 async def match_bank_transaction(
     tx_id: int,
     payload: BankManualMatch,
+    organization_id: int = Query(..., gt=0),
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
+    user=Depends(get_current_user),
 ):
-    """Ручная привязка зачисления к счёту (очередь). Проводит поступление тем же путём."""
-    tx = await session.get(BankTransaction, tx_id)
+    """Разнести подтверждённое зачисление на платёж той же организации."""
+    gateway = getattr(core.services, "accounting", None)
+    if gateway is None:
+        raise HTTPException(503, "Organization access service unavailable")
+    await gateway.lock_finance_bank_transaction(session, organization_id, user, tx_id)
+    tx = (await session.execute(select(BankTransaction).where(
+        BankTransaction.id == tx_id,
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if tx is None:
-        raise HTTPException(status_code=404, detail="Зачисление не найдено")
-    if tx.source_provider is not None or tx.direction != "receipt":
-        raise HTTPException(status_code=409, detail="Операция полной выписки обрабатывается в бухгалтерии")
-    if tx.match_status in {"matched", "manual"}:
-        raise HTTPException(status_code=409, detail="Зачисление уже сматчено")
-    payment = await session.get(Payment, payload.payment_id)
+        raise HTTPException(404, "Зачисление не найдено")
+    if (tx.direction != "receipt" or any(value is not None for value in (
+        tx.source_provider, tx.source_external_id, tx.source_kind, tx.source_reference,
+    ))):
+        raise HTTPException(409, "Операция полной выписки обрабатывается в бухгалтерии")
+    if (tx.match_status != "unmatched"
+            or tx.payment_id is not None or tx.allocation_id is not None):
+        raise HTTPException(409, "Зачисление уже разнесено или содержит несогласованные связи")
+    payment = (await session.execute(select(Payment).where(
+        Payment.id == payload.payment_id, Payment.organization_id == organization_id,
+    ).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if payment is None:
-        raise HTTPException(status_code=404, detail="Счёт не найден")
+        raise HTTPException(404, "Счёт не найден")
+    if is_landed_projection(payment):
+        raise HTTPException(409, "К расчёту себестоимости нельзя добавить поступление денег")
+    if payment.status in {"cancelled", "superseded"}:
+        raise HTTPException(409, "Счёт отменён или заменён. Новое поступление к нему вручную не добавляется")
     from core.services.nbrb import RateUnavailable
     from modules.finance.official_fx import bank_amount
 
     try:
         amt = await bank_amount(session, tx)
     except RateUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(503, str(exc)) from exc
     if amt <= 0:
-        raise HTTPException(status_code=400, detail="У зачисления нет суммы")
+        raise HTTPException(400, "У зачисления нет суммы")
     alloc = await apply_allocation(session, core.event_bus, payment, amt)
     tx.match_status = "manual"
     tx.payment_id = payment.id
     tx.allocation_id = alloc.id
     tx.note = None
+    await session.flush()
+    out = {**BankTxOut.model_validate(tx).model_dump(), "organization_id": organization_id}
     await session.commit()
-    await session.refresh(tx)
-    return tx
+    return out
 

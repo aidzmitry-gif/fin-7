@@ -23,17 +23,20 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from modules.finance.models import Payment
+from modules.finance.models import LANDED_PROJECTION_PREFIX, Payment
 from modules.finance.schemas import money_str
 
 _KINDS = ("receivable", "freight", "freight_refund", "landed", "claim_refund", "po_planned")
 
 
-async def _sum_by_kind(session: AsyncSession) -> dict[str, Decimal]:
+async def _sum_by_kind(session: AsyncSession, *, organization_id: int) -> dict[str, Decimal]:
     """Сумма ``amount`` по каждому ``kind`` (отсутствующий kind = 0)."""
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("organization_id must be a positive integer")
     rows = (
         await session.execute(
-            select(Payment.kind, func.coalesce(func.sum(Payment.amount), 0)).group_by(Payment.kind)
+            select(Payment.kind, func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.organization_id == organization_id).group_by(Payment.kind)
         )
     ).all()
     by_kind = {kind: Decimal("0") for kind in _KINDS}
@@ -42,11 +45,14 @@ async def _sum_by_kind(session: AsyncSession) -> dict[str, Decimal]:
     return by_kind
 
 
-async def _paid_receivable(session: AsyncSession) -> Decimal:
+async def _paid_receivable(session: AsyncSession, *, organization_id: int) -> Decimal:
     """Сумма оплаченных счетов (``receivable`` со статусом ``paid``) — реальные поступления."""
+    if type(organization_id) is not int or organization_id <= 0:
+        raise ValueError("organization_id must be a positive integer")
     total = (
         await session.execute(
             select(func.coalesce(func.sum(Payment.amount), 0)).where(
+                Payment.organization_id == organization_id,
                 Payment.kind == "receivable", Payment.status == "paid"
             )
         )
@@ -54,10 +60,10 @@ async def _paid_receivable(session: AsyncSession) -> Decimal:
     return Decimal(str(total))
 
 
-async def finance_summary(session: AsyncSession) -> dict:
+async def finance_summary(session: AsyncSession, *, organization_id: int) -> dict:
     """Сводка: маржа по фактам + касса (ДДС-lite). Money — ``str`` BYN; ``pct`` — процент (float)."""
-    by_kind = await _sum_by_kind(session)
-    paid_recv = await _paid_receivable(session)
+    by_kind = await _sum_by_kind(session, organization_id=organization_id)
+    paid_recv = await _paid_receivable(session, organization_id=organization_id)
 
     revenue = by_kind["receivable"]
     freight = by_kind["freight"]
@@ -72,10 +78,16 @@ async def finance_summary(session: AsyncSession) -> dict:
     # маржа в % — только когда есть выручка (иначе делёж на ноль → честный None)
     pct = float(gross / revenue * 100) if revenue > 0 else None
 
-    # касса (ДДС-lite): поступления (оплаченные счета + возвраты фрахта) − расходы (фрахт+landed)
+    # Legacy cash semantics are retained; the new verified PO cost is not cash.
     refund_inflow = -refund  # хранится отрицательной → приток = модуль
     inflow = paid_recv + refund_inflow
-    outflow = freight + landed
+    cost_only = Decimal(str((await session.execute(
+        select(func.coalesce(func.sum(Payment.amount), 0)).where(
+            Payment.organization_id == organization_id, Payment.kind == "landed",
+            Payment.entity_ref.startswith(LANDED_PROJECTION_PREFIX),
+        )
+    )).scalar_one()))
+    outflow = freight + landed - cost_only
     net_cash = inflow - outflow
 
     # money — строкой BYN (см. money_str); pct — процент, НЕ деньги, остаётся float

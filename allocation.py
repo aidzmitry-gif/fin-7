@@ -14,7 +14,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from modules.finance.models import Payment, PaymentAllocation
+from modules.finance.models import Payment, PaymentAllocation, is_landed_projection
 
 
 async def sum_allocations(session: AsyncSession, payment_id: int) -> Decimal:
@@ -43,6 +43,9 @@ async def apply_allocation(
     # The caller may have loaded this invoice before replacement or settlement.
     # Refresh under the same row lock used to retire an invoice's demand.
     await session.refresh(payment, with_for_update=True)
+    if is_landed_projection(payment):
+        raise ValueError("A landed calculation is cost, not a payment receivable")
+    owner = {"organization_id": payment.organization_id} if payment.organization_id is not None else {}
     alloc = PaymentAllocation(payment_id=payment.id, amount=amount)
     session.add(alloc)
     await session.flush()
@@ -53,6 +56,7 @@ async def apply_allocation(
         session,
         "finance.payment.received",
         {
+            **owner,
             "ref": payment.ref,
             "amount": str(amount),
             "entity_ref": f"payment:{payment.id}",
@@ -61,16 +65,16 @@ async def apply_allocation(
             "outstanding": str(outstanding_after if outstanding_after > 0 else Decimal("0")),
         },
     )
-    if total >= target:
+    if total >= target and payment.status not in {"cancelled", "superseded"}:
         if payment.status != "paid":
             payment.status = "paid"
             payment.paid_at = datetime.now(UTC)
             event_bus.emit(
                 session,
                 "finance.payment.paid",
-                {"ref": payment.ref, "deal_id": payment.deal_id, "entity_ref": f"payment:{payment.id}"},
+                {**owner, "ref": payment.ref, "deal_id": payment.deal_id, "entity_ref": f"payment:{payment.id}"},
             )
-    elif total > 0 and payment.status not in {"paid", "superseded"}:
+    elif total > 0 and payment.status not in {"paid", "cancelled", "superseded"}:
         payment.status = "partial"
     return alloc
 

@@ -1,13 +1,11 @@
-"""Импорт входящих зачислений из банка + матчинг к счетам (Альфа host-to-host, слайс 1).
+"""Импорт входящих зачислений из legacy-канала банка (Альфа host-to-host).
 
 Поток: ``core.services.bank.fetch_incoming`` → дедуп по ``ext_id`` (идемпотентность) →
-матчер (назначение платежа + УНП) → авто-проводка поступления ЕДИНЫМ путём
-(``allocation.apply_allocation`` → событие ``finance.payment.received`` → офис в «Оплачено»).
-Несматченное — в очередь ``match_status='unmatched'`` («разобрать вручную»).
+диагностика кандидатов (назначение платежа + УНП) → очередь ``match_status='unmatched'``.
+Без подтверждённого владельца банковского канала автоматическое распределение запрещено.
 
-⚠ Деньги (PLATFORM #1): суммы — Decimal из строки (не float); авто-проводим ТОЛЬКО при
-однозначном совпадении. Любая неоднозначность (несколько кандидатов / переплата / УНП не
-совпал) → очередь, а не догадка. Фабриковать зачисления нельзя — источник без кредов даёт [].
+Суммы — Decimal из строки (не float). Совпадение назначения или УНП не устанавливает
+владельца канала. Источник без настроенного доступа отдаёт пустой результат.
 """
 from __future__ import annotations
 
@@ -18,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.domain.models import Counterparty
-from modules.finance.allocation import apply_allocation, sum_allocations
+from modules.finance.allocation import sum_allocations
 from modules.finance.models import BankTransaction, Payment
 from modules.finance.official_fx import bank_currency, bank_source_amount
 
@@ -132,7 +130,7 @@ class BankSourceIdentityConflict(ValueError):
 
 
 async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -> dict:
-    """Опросить банк, провести идемпотентно, сматчить. Возврат — сводка по итогам.
+    """Опросить legacy-канал и идемпотентно сохранить зачисления для проверки владельца.
 
     Идемпотентность: уже виденные ``ext_id`` пропускаем (не задваиваем зачисление).
     Транзакцию НЕ коммитим — граница у роута (``POST /finance/bank/sync``).
@@ -173,16 +171,10 @@ async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -
 
         amount = await bank_amount(session, row)
         payment, reason = await _match_candidate(session, tx, amount)
-        if payment is not None:
-            alloc = await apply_allocation(session, event_bus, payment, amount)
-            row.match_status = "matched"
-            row.payment_id = payment.id
-            row.allocation_id = alloc.id
-            matched += 1
-        else:
-            row.match_status = "unmatched"
-            row.note = reason
-            unmatched += 1
+        row.match_status = "unmatched"
+        row.note = ("Не подтверждены владельцы организаций банковского канала и счёта"
+                    if payment is not None else reason)
+        unmatched += 1
         session.add(row)
 
     return {
