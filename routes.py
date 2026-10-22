@@ -15,7 +15,13 @@ from core.runtime.core import Core
 from core.runtime.deps import get_core, get_session
 from core.services.auth import get_current_user
 from modules.finance.allocation import apply_allocation, sum_allocations
-from modules.finance.models import BankAccount, BankTransaction, Payment, PaymentAllocation, is_landed_projection
+from modules.finance.models import (
+    BankAccount,
+    BankTransaction,
+    Payment,
+    PaymentAllocation,
+    is_landed_projection,
+)
 from modules.finance.schemas import (
     AllocationCreate,
     AllocationOut,
