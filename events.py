@@ -35,6 +35,19 @@ def _to_decimal(raw) -> Decimal:
         return Decimal("0")
 
 
+def _event_money(raw, field: str) -> Decimal:
+    """Reject malformed event values while retaining explicit finite zero."""
+    if raw is None or isinstance(raw, bool) or raw == "":
+        raise ValueError(f"Invalid {field} amount")
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {field} amount") from exc
+    if not value.is_finite() or value < 0:
+        raise ValueError(f"Invalid {field} amount")
+    return value
+
+
 async def on_document_posted(payload: dict, ctx) -> None:
     """Счёт выпущен в ERP → создаём платёж к оплате (sales → finance).
 
@@ -46,7 +59,7 @@ async def on_document_posted(payload: dict, ctx) -> None:
     """
     if payload.get("kind") != "invoice" or ctx is None:
         return
-    amount = _to_decimal(payload.get("amount"))
+    amount = _event_money(payload.get("amount"), "invoice")
     currency = (payload.get("currency") or BASE_CCY).strip().upper()
     amount_byn = await event_amount(amount, currency, payload, ctx)
     ctx.session.add(
@@ -148,13 +161,15 @@ async def on_landed_cost(payload: dict, ctx) -> None:
     """
     if ctx is None:
         return
-    amount = _to_decimal(payload.get("amount"))
+    amount = _event_money(payload["amount"], "landed") if "amount" in payload else Decimal("0")
     currency = (payload.get("currency") or BASE_CCY).strip().upper()
     if amount <= 0:
-        amount = _to_decimal(payload.get("total_landed_byn"))
+        amount = _event_money(payload["total_landed_byn"], "landed total") if "total_landed_byn" in payload else Decimal("0")
         currency = BASE_CCY
     if amount <= 0:
-        amount = _to_decimal(payload.get("unit_landed_cost_byn")) * _to_decimal(payload.get("qty"))
+        unit = _event_money(payload["unit_landed_cost_byn"], "landed unit") if "unit_landed_cost_byn" in payload else Decimal("0")
+        qty = _event_money(payload["qty"], "landed quantity") if "qty" in payload else Decimal("0")
+        amount = unit * qty
     if amount <= 0:
         return
     ref = payload.get("entity_ref") or payload.get("sku_code") or ""
