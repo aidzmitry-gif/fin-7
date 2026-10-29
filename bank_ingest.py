@@ -1,13 +1,13 @@
 """Импорт входящих зачислений из банка + матчинг к счетам (Альфа host-to-host, слайс 1).
 
 Поток: ``core.services.bank.fetch_incoming`` → дедуп по ``ext_id`` (идемпотентность) →
-матчер (назначение платежа + УНП) → авто-проводка поступления ЕДИНЫМ путём
-(``allocation.apply_allocation`` → событие ``finance.payment.received`` → офис в «Оплачено»).
-Несматченное — в очередь ``match_status='unmatched'`` («разобрать вручную»).
+матчер (назначение платежа + УНП) → очередь ``match_status='unmatched'``.
+Старый контракт не подтверждает владельцев юрлиц и банковскую проводку;
+совпадение реквизитов само по себе не создаёт оплату или событие её получения.
 
-⚠ Деньги (PLATFORM #1): суммы — Decimal из строки (не float); авто-проводим ТОЛЬКО при
-однозначном совпадении. Любая неоднозначность (несколько кандидатов / переплата / УНП не
-совпал) → очередь, а не догадка. Фабриковать зачисления нельзя — источник без кредов даёт [].
+⚠ Деньги (PLATFORM #1): суммы — Decimal из строки (не float); даже однозначный кандидат
+остаётся в очереди до проверки принадлежности и проведения через бухгалтерию.
+Фабриковать зачисления нельзя — источник без кредов даёт [].
 """
 from __future__ import annotations
 
@@ -18,12 +18,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.domain.models import Counterparty
-from modules.finance.allocation import apply_allocation, sum_allocations
+from modules.finance.allocation import sum_allocations
 from modules.finance.models import BankTransaction, Payment
 from modules.finance.official_fx import bank_currency, bank_source_amount
 
 # Открытый счёт к получению = ждёт денег от клиента.
 _OPEN_STATUSES = ("pending", "partial")
+
+LEGACY_BANK_REVIEW_REQUIRED = (
+    "Не подтверждены владельцы организаций банковской операции и счёта. "
+    "Проведите операцию и подтвердите расчёт по счёту в бухгалтерии выбранного юрлица."
+)
 
 
 def _to_decimal(raw) -> Decimal | None:
@@ -81,11 +86,11 @@ async def _match_candidate(
 ) -> tuple[Payment | None, str]:
     """Найти единственный открытый счёт под зачисление. Возврат (payment|None, причина).
 
-    Правила авто-матча (консервативно — деньги):
+    Правила подбора кандидата для сверки (консервативно — деньги):
       1. кандидаты = открытые ``receivable`` (pending/partial) с остатком > 0, чей номер
          фигурирует в назначении платежа;
       2. если у зачисления есть УНП и у счёта УНП восстановлен и НЕ совпал — кандидат отпадает;
-      3. авто-матч ТОЛЬКО если остался ровно ОДИН кандидат и сумма ≤ остатку.
+      3. кандидат определён, только если он ОДИН и сумма ≤ остатку.
     Иначе — причина для очереди.
     """
     purpose_upper = re.sub(r"[^0-9A-Za-zА-Яа-я]", "", tx.get("purpose") or "").upper()
@@ -132,7 +137,7 @@ class BankSourceIdentityConflict(ValueError):
 
 
 async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -> dict:
-    """Опросить банк, провести идемпотентно, сматчить. Возврат — сводка по итогам.
+    """Идемпотентно сохранить входящие источники для сверки, без создания оплат.
 
     Идемпотентность: уже виденные ``ext_id`` пропускаем (не задваиваем зачисление).
     Транзакцию НЕ коммитим — граница у роута (``POST /finance/bank/sync``).
@@ -172,17 +177,12 @@ async def sync_incoming(session: AsyncSession, gateway, event_bus, since=None) -
         from modules.finance.official_fx import bank_amount
 
         amount = await bank_amount(session, row)
-        payment, reason = await _match_candidate(session, tx, amount)
-        if payment is not None:
-            alloc = await apply_allocation(session, event_bus, payment, amount)
-            row.match_status = "matched"
-            row.payment_id = payment.id
-            row.allocation_id = alloc.id
-            matched += 1
-        else:
-            row.match_status = "unmatched"
-            row.note = reason
-            unmatched += 1
+        candidate, reason = await _match_candidate(session, tx, amount)
+        # No organization or verified ledger identity exists in this legacy
+        # command. Never turn a name/number match into a paid invoice.
+        row.match_status = "unmatched"
+        row.note = LEGACY_BANK_REVIEW_REQUIRED if candidate is not None else reason
+        unmatched += 1
         session.add(row)
 
     return {

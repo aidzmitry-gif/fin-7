@@ -606,7 +606,7 @@ async def bank_sync(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
-    """Опросить банк, идемпотентно провести зачисления, сматчить к счетам (Альфа, слайс 1).
+    """Опросить банк и сохранить зачисления для сверки без проведения оплаты.
 
     Источник — ``core.services.bank`` (нет кредов → пусто, честная деградация). Под гейтом
     модуля ``finance`` (аноним/чужая роль → 403 middleware). Возврат — сводка sync.
@@ -655,7 +655,7 @@ async def match_bank_transaction(
     core: Core = Depends(get_core),
     session: AsyncSession = Depends(get_session),
 ):
-    """Ручная привязка зачисления к счёту (очередь). Проводит поступление тем же путём."""
+    """Старую неподтверждённую операцию направляем в сверку выбранного юрлица."""
     tx = await session.get(BankTransaction, tx_id)
     if tx is None:
         raise HTTPException(status_code=404, detail="Зачисление не найдено")
@@ -666,21 +666,7 @@ async def match_bank_transaction(
     payment = await session.get(Payment, payload.payment_id)
     if payment is None:
         raise HTTPException(status_code=404, detail="Счёт не найден")
-    from core.services.nbrb import RateUnavailable
-    from modules.finance.official_fx import bank_amount
+    from modules.finance.bank_ingest import LEGACY_BANK_REVIEW_REQUIRED
 
-    try:
-        amt = await bank_amount(session, tx)
-    except RateUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if amt <= 0:
-        raise HTTPException(status_code=400, detail="У зачисления нет суммы")
-    alloc = await apply_allocation(session, core.event_bus, payment, amt)
-    tx.match_status = "manual"
-    tx.payment_id = payment.id
-    tx.allocation_id = alloc.id
-    tx.note = None
-    await session.commit()
-    await session.refresh(tx)
-    return tx
+    raise HTTPException(status_code=409, detail=LEGACY_BANK_REVIEW_REQUIRED)
 
